@@ -1,0 +1,1 @@
+<RCC><qresource prefix="/qt/qml/WaniEngineManager/qml"><file alias="ActorScene.qml">../qml/ActorScene_redesign.qml</file></qresource><qresource prefix="/icons"><file alias="waniengine.png">../../../assets/waniengine.png</file></qresource></RCC>

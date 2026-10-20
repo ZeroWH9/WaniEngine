@@ -1,0 +1,17 @@
+{
+  "KPackageStructure": "Plasma/Wallpaper",
+  "KPlugin": {
+    "Authors": [
+      {
+        "Name": "WaniEngine contributors"
+      }
+    ],
+    "Category": "",
+    "Description": "Local animated wallpapers for WaniEngine",
+    "Icon": "preferences-desktop-wallpaper",
+    "Id": "org.waniengine.wallpaper",
+    "License": "BSD-3-Clause",
+    "Name": "WaniEngine"
+  },
+  "X-KDE-ParentApp": "org.kde.plasmashell"
+}

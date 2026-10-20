@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="ContentUrl" type="String">
+      <label>Local wallpaper file</label>
+      <default>none</default>
+    </entry>
+    <entry name="ContentKind" type="String">
+      <label>Background content type</label>
+      <default>color</default>
+    </entry>
+    <entry name="FitMode" type="String">
+      <label>Image fit</label>
+      <default>cover</default>
+    </entry>
+    <entry name="AudioEnabled" type="bool">
+      <label>Play video audio</label>
+      <default>false</default>
+    </entry>
+    <entry name="BackgroundColor" type="String">
+      <label>Background color</label>
+      <default>#202020</default>
+    </entry>
+    <entry name="ActorsJson" type="String">
+      <label>Character animations</label>
+      <default>[]</default>
+    </entry>
+    <entry name="Speed" type="int">
+      <label>Global animation speed</label>
+      <default>100</default>
+      <min>10</min>
+      <max>300</max>
+    </entry>
+    <entry name="Volume" type="int">
+      <default>50</default>
+      <min>0</min>
+      <max>100</max>
+    </entry>
+    <entry name="Playing" type="bool"><default>true</default></entry>
+    <entry name="Loop" type="bool"><default>true</default></entry>
+    <entry name="VisualOptionsJson" type="String"><default>{}</default></entry>
+    <entry name="AudioOptionsJson" type="String"><default>{}</default></entry>
+    <entry name="SessionToken" type="String">
+      <label>Temporary application session</label>
+      <default>inactive</default>
+    </entry>
+  </group>
+</kcfg>

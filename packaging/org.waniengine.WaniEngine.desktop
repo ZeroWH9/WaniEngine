@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WaniEngine
+Comment=Animated wallpapers and desktop characters
+Exec=waniengine --resume-wallpaper
+Icon=waniengine
+Terminal=false
+Categories=Graphics;
+StartupWMClass=org.waniengine.WaniEngine
+X-KDE-Wayland-Interfaces=org_kde_plasma_window_management
+X-WaniEngine-Managed=true

@@ -1,0 +1,17 @@
+/target/
+/crates/waniengine-app/qml/generated/
+/crates/waniengine-app/.qmlls.ini
+/scripts/__pycache__/
+/tests/__pycache__/
+/validation/
+/output/
+/build/
+**/build/
+/dist/
+/media-tests/
+__pycache__/
+*.py[cod]
+*.sock
+*.log
+*.core
+.DS_Store
