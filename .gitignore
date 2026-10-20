@@ -15,3 +15,14 @@ __pycache__/
 *.log
 *.core
 .DS_Store
+
+# Ignore hidden directories, except .github/ISSUE_TEMPLATE
+.*/
+!.github/
+.github/*
+!.github/ISSUE_TEMPLATE/
+!.github/ISSUE_TEMPLATE/**
+
+# Ignore Markdown files except README.md
+*.md
+!README.md
