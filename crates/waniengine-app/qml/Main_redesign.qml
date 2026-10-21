@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtMultimedia
-import org.kde.taskmanager as TaskManager
 import WaniEngine.Runtime 1.0 as Engine
 
 ApplicationWindow {
@@ -37,6 +36,8 @@ ApplicationWindow {
     readonly property color pink: "#FB7185"
 
     property var assets: []
+    // Files found in the Videos folder. Read-only extras, never saved as assets.
+    property var libraryExtras: []
     property var playlist: []
     property string playlistName: "Unsaved"
     property bool playlistDirty: false
@@ -97,7 +98,8 @@ ApplicationWindow {
     }
     readonly property var visibleAssets: {
         const needle = searchText.trim().toLowerCase()
-        let rows = assets.filter((item) => {
+        // Discovered files come from the Videos folder and are read-only extras.
+        let rows = assets.concat(libraryExtras || []).filter((item) => {
             const matchesText = needle.length === 0 || item.name.toLowerCase().includes(needle)
             const matchesKind = contentFilter === "all" || item.kind === contentFilter
             const matchesFavorite = !favoritesOnly || item.favorite
@@ -164,7 +166,7 @@ ApplicationWindow {
             if(typeof sceneStore.describeMedia === "function") Object.assign(item,JSON.parse(sceneStore.describeMedia(url)))
             if (typeof sceneStore.organizeAsset === "function") {
                 item = JSON.parse(sceneStore.organizeAsset(JSON.stringify(item)))
-                if (!item.url) {showStatus("Could not copy this file into the library.");continue}
+                if (!item.url) {showStatus("Could not add this file to the library.");continue}
             }
             next.push(item)
             if (firstAdded.length === 0)
@@ -317,6 +319,10 @@ ApplicationWindow {
     }
 
     function removeAsset(url) {
+        if ((libraryExtras || []).some((item) => item.url === url)) {
+            showStatus("This file lives in your Videos folder. Move it out of Videos/WaniEngine to remove it.")
+            return
+        }
         if(actorUrls.indexOf(url)>=0) {
             const next=actorUrls.filter((entry)=>entry!==url)
             if(!overlayController.applyActors(actorsConfiguration(next),selectedMonitor)) {showStatus(overlayController.lastError);return}
@@ -584,6 +590,7 @@ ApplicationWindow {
                     fit: "cover"
                 }, item, !item.width && !item.missing && typeof sceneStore.describeMedia === "function" ? JSON.parse(sceneStore.describeMedia(item.url)) : {})
             })
+            libraryExtras = (state.discovered || []).map((item) => Object.assign({extension: fileExtension(item.url || "").toUpperCase()}, item))
             playlist = (state.playlist || []).filter(url => assets.some(item => item.url===url && item.kind==="wallpaper"))
             playlistName = state.playlistName || "Unsaved"
             playlistDirty = !!state.playlistDirty
@@ -612,6 +619,15 @@ ApplicationWindow {
             playlist = []
             actorUrls = []
         }
+    }
+
+    function reloadLibrary() {
+        const previousUrl = selectedUrl
+        saveState()
+        restoreState()
+        if (assets.some(asset => asset.url === previousUrl))
+            selectedUrl = previousUrl
+        showStatus("Library reloaded.")
     }
 
     property var actorUrls: []
@@ -689,27 +705,46 @@ ApplicationWindow {
             return !!url && monitorNames.indexOf(monitor)>=0 && restoredWallpapers[monitor]!==url && restoreGiveUp[monitor]!==url
         })
     }
+    property bool pausePolicyAvailable: false
+    property var windowObservers: null
     function updateWindowPolicy() {
         let paused=false
-        for(let i=0;i<windowObservers.count;++i) {
-            const window=windowObservers.objectAt(i)
-            if(window && window.activeWindow && ((settings.pauseFullscreen && window.fullscreen) || (settings.pauseMaximized && window.maximized))) {paused=true;break}
+        const observers = windowObservers
+        if(observers && settings) {
+            for(let i=0;i<observers.count;++i) {
+                const win=observers.objectAt(i)
+                if(win && win.activeWindow && ((settings.pauseFullscreen && win.fullscreen) || (settings.pauseMaximized && win.maximized))) {paused=true;break}
+            }
         }
         automaticPause=paused
     }
-    Instantiator {
-        id: windowObservers
-        model: TaskManager.TasksModel { groupMode: TaskManager.TasksModel.GroupDisabled }
-        delegate: QtObject {
-            property bool activeWindow: model.IsActive === true
-            property bool fullscreen: model.IsFullScreen === true
-            property bool maximized: model.IsMaximized === true
-            onActiveWindowChanged: Qt.callLater(root.updateWindowPolicy)
-            onFullscreenChanged: Qt.callLater(root.updateWindowPolicy)
-            onMaximizedChanged: Qt.callLater(root.updateWindowPolicy)
+    // Plasma's TaskManager drives the pause policy. It is absent on GNOME, so
+    // instantiate the observer only when the QML module is actually importable.
+    function createWindowObservers() {
+        if (typeof Qt.createQmlObject !== "function") return
+        try {
+            windowObservers = Qt.createQmlObject(`
+                import QtQml
+                import org.kde.taskmanager as TaskManager
+                Instantiator {
+                    model: TaskManager.TasksModel { groupMode: TaskManager.TasksModel.GroupDisabled }
+                    delegate: QtObject {
+                        property bool activeWindow: model.IsActive === true
+                        property bool fullscreen: model.IsFullScreen === true
+                        property bool maximized: model.IsMaximized === true
+                        onActiveWindowChanged: Qt.callLater(root.updateWindowPolicy)
+                        onFullscreenChanged: Qt.callLater(root.updateWindowPolicy)
+                        onMaximizedChanged: Qt.callLater(root.updateWindowPolicy)
+                    }
+                    onObjectAdded: Qt.callLater(root.updateWindowPolicy)
+                    onObjectRemoved: Qt.callLater(root.updateWindowPolicy)
+                }`, root, "windowObservers")
+            pausePolicyAvailable = windowObservers !== null
+        } catch (error) {
+            windowObservers = null
+            pausePolicyAvailable = false
         }
-        onObjectAdded: Qt.callLater(root.updateWindowPolicy)
-        onObjectRemoved: Qt.callLater(root.updateWindowPolicy)
+        Qt.callLater(root.updateWindowPolicy)
     }
     onAutomaticPauseChanged: livePropertyTimer.restart()
 
@@ -736,6 +771,7 @@ ApplicationWindow {
 
     Component.onCompleted: {
         restoreState()
+        createWindowObservers()
         if (!applicationController.setStartWithSession(!!settings.startWithSession))
             showStatus("Could not update the autostart entry.")
         reconcileSelectedMonitor()
@@ -1209,6 +1245,15 @@ ApplicationWindow {
                         Layout.preferredWidth: 136
                         Layout.preferredHeight: 40
                         onClicked: genericFiles.open()
+                        background: Rectangle { radius: 10; color: "#242130"; border.color: "#383341" }
+                        contentItem: Text { text: parent.text; color: "#F4F2FA"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    }
+
+                    Button_redesign {
+                        text: "Reload"
+                        Layout.preferredWidth: 104
+                        Layout.preferredHeight: 40
+                        onClicked: root.reloadLibrary()
                         background: Rectangle { radius: 10; color: "#242130"; border.color: "#383341" }
                         contentItem: Text { text: parent.text; color: "#F4F2FA"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
@@ -1783,7 +1828,7 @@ ApplicationWindow {
                     Text {text:root.assets.length+" items · "+root.assets.filter(asset=>asset.kind==="wallpaper").length+" wallpapers · "+root.assets.filter(asset=>asset.kind==="character").length+" characters";color:root.textMuted;font.pixelSize:13}
                     Text {Layout.fillWidth:true;text:"Your installed collection is available in this preview. Original media and installed settings are preserved; preview changes are stored separately.";color:root.textDisabled;font.pixelSize:12;wrapMode:Text.WordWrap}
                     Text {Layout.fillWidth:true;text:sceneStore.libraryDirectory();color:root.textMuted;font.pixelSize:12;wrapMode:Text.WrapAnywhere}
-                    Button_redesign {text:"Open preview library folder";onClicked:sceneStore.openFolder("file://"+sceneStore.libraryDirectory())}
+                    Button_redesign {text:"Open WaniEngine videos folder";onClicked:sceneStore.openFolder("file://"+sceneStore.libraryDirectory())}
                     Item {Layout.fillHeight:true}
                 }
                 ColumnLayout {

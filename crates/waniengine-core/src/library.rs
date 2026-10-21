@@ -1,6 +1,6 @@
 //! Compatible library storage for the Rust manager. Installed content is read-only;
 //! edits, imports and playlists belong to the manager's separate data directory.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
@@ -11,6 +11,106 @@ use std::{
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 const MAX_JSON: u64 = 16 * 1024 * 1024;
+
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+pub fn user_videos_directory() -> PathBuf {
+    let home = home_directory().unwrap_or_else(|| PathBuf::from("."));
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("user-dirs.dirs");
+
+    if let Ok(contents) = fs::read_to_string(config) {
+        for line in contents.lines() {
+            let Some(value) = line.strip_prefix("XDG_VIDEOS_DIR=") else {
+                continue;
+            };
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .replace("$HOME", &home.to_string_lossy());
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                return path.join("WaniEngine");
+            }
+        }
+    }
+
+    let english = home.join("Videos");
+    let localized = home.join("Vídeos");
+    if english.is_dir() || !localized.is_dir() {
+        english.join("WaniEngine")
+    } else {
+        localized.join("WaniEngine")
+    }
+}
+
+fn is_supported_media(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase()),
+        Some(extension) if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "apng" | "bmp" | "svg" | "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v")
+    )
+}
+
+fn media_kind(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("gif" | "apng") => "character",
+        _ => "wallpaper",
+    }
+}
+
+fn discover_media(root: &Path) -> Vec<Value> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_supported_media(path))
+        .map(|path| {
+            let name = path
+                .file_stem()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Content".into());
+            let video = matches!(
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.to_ascii_lowercase())
+                    .as_deref(),
+                Some("mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v")
+            );
+            json!({
+                "id": format!("file-{}", path.to_string_lossy()),
+                "url": file_url(&path),
+                "originalSource": file_url(&path),
+                "name": name,
+                "kind": media_kind(&path),
+                "video": video,
+                "favorite": false,
+                "addedAt": 0,
+                "speed": 100,
+                "posX": 50,
+                "posY": 96,
+                "opacity": 100,
+                "flipX": false,
+                "scale": 100,
+                "volume": 50,
+                "muted": true,
+                "fit": "cover"
+            })
+        })
+        .collect()
+}
 
 pub fn file_path(url: &str) -> Result<PathBuf> {
     let path = if let Some(rest) = url.strip_prefix("file://") {
@@ -267,7 +367,24 @@ impl LibraryStore {
                 }
             }
         }
+        let known_urls: std::collections::HashSet<String> = assets
+            .iter()
+            .filter_map(|asset| asset["url"].as_str().map(str::to_owned))
+            .collect();
+        // Files dropped into the Videos folder are discovered fresh on every
+        // load and reported separately. They must never be merged into
+        // `assets`, because the UI saves that list back to scene.json and the
+        // discovered files would become stale ghost entries.
+        let discovered: Vec<Value> = discover_media(&user_videos_directory())
+            .into_iter()
+            .filter(|asset| {
+                asset["url"]
+                    .as_str()
+                    .is_some_and(|url| !known_urls.contains(url))
+            })
+            .collect();
         state["assets"] = json!(assets);
+        state["discovered"] = json!(discovered);
         state["schema"] = json!(2);
         // The preview must not install an autostart entry merely because the old app did.
         if !self.root.join("scene.json").is_file() {
@@ -440,10 +557,7 @@ fn validate_playlist(value: &Value) -> Result<()> {
     let assets = value["assets"]
         .as_array()
         .ok_or("Missing playlist assets")?;
-    if value["format"] != "waniengine-playlist"
-        || value["version"] != 1
-        || assets.len() > 1000
-    {
+    if value["format"] != "waniengine-playlist" || value["version"] != 1 || assets.len() > 1000 {
         return Err("Unsupported playlist format".into());
     }
     for asset in assets {
@@ -520,6 +634,68 @@ mod tests {
         assert_eq!(s["assets"].as_array().unwrap().len(), 2);
         assert_eq!(s["assets"][0]["missing"], true);
     }
+    #[test]
+    fn discovered_media_never_enters_the_saved_asset_list() {
+        let t = Temp::new();
+        write_json(
+            &t.0.join("installed"),
+            &json!({"assets":[{"name":"Saved","url":file_url(&t.0.join("saved.png"))}]}),
+        )
+        .unwrap();
+        fs::write(t.0.join("saved.png"), b"png").unwrap();
+        let store = LibraryStore::new(t.0.join("own"), t.0.join("installed"));
+        let state = store.load_scene().unwrap();
+        // The persisted list keeps only owned entries; discovery is reported
+        // separately so it can never be written back to scene.json.
+        assert_eq!(state["assets"].as_array().unwrap().len(), 1);
+        assert_eq!(state["assets"][0]["name"], "Saved");
+        assert!(state["discovered"].is_array());
+        store.save_scene(state.clone()).unwrap();
+        let reloaded = store.load_scene().unwrap();
+        assert_eq!(reloaded["assets"].as_array().unwrap().len(), 1);
+    }
+    #[test]
+    fn organize_sanitizes_hostile_names_and_never_escapes_the_root() {
+        let t = Temp::new();
+        fs::write(t.0.join("a.gif"), b"gif").unwrap();
+        let store = LibraryStore::new(t.0.join("preview"), t.0.join("none"));
+        for name in ["..", ".", "../escape", "a/b\\c:d", "   "] {
+            let asset = store
+                .organize(json!({"url":file_url(&t.0.join("a.gif")),"name":name,"kind":"wallpaper"}))
+                .unwrap();
+            let folder = file_path(asset["folderUrl"].as_str().unwrap()).unwrap();
+            assert!(
+                folder.starts_with(store.root.join("contents")),
+                "{name} escaped the library: {folder:?}"
+            );
+            assert!(folder.is_dir());
+        }
+    }
+
+    #[test]
+    fn discover_media_keeps_supported_files_and_ignores_the_rest() {
+        let t = Temp::new();
+        fs::write(t.0.join("still.PNG"), b"png").unwrap();
+        fs::write(t.0.join("loop.GIF"), b"gif").unwrap();
+        fs::write(t.0.join("clip.MP4"), b"mp4").unwrap();
+        fs::write(t.0.join("notes.txt"), b"txt").unwrap();
+        let assets = discover_media(&t.0);
+        assert_eq!(assets.len(), 3);
+        assert!(assets.iter().all(|asset| asset["video"].is_boolean()));
+        let loop_asset = assets
+            .iter()
+            .find(|asset| asset["name"] == "loop")
+            .expect("gif discovered");
+        assert_eq!(loop_asset["kind"], "character");
+        assert_eq!(loop_asset["video"], false);
+        let clip = assets
+            .iter()
+            .find(|asset| asset["name"] == "clip")
+            .expect("video discovered");
+        assert_eq!(clip["video"], true);
+        assert_eq!(clip["kind"], "wallpaper");
+    }
+
     #[test]
     fn import_and_audio_copy_keep_originals() {
         let t = Temp::new();

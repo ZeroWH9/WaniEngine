@@ -1,6 +1,8 @@
 #include "package_validator.h"
+#ifdef WANIENGINE_HAS_KF6
 #include <KConfigLoader>
 #include <KConfigPropertyMap>
+#endif
 #include <QDBusMetaType>
 #include <QFile>
 #include <QJsonArray>
@@ -27,13 +29,15 @@ QJsonObject validateWallpaperPackage(const QString &source)
     while (!reader.atEnd()) {
         reader.readNext();
         if (reader.isStartElement() && reader.name() == u"entry") {
-            const QString key = reader.attributes().value(u"name").toString();
+            const QString key = reader.attributes().value(u"name"_s).toString();
             if (key.isEmpty() || expectedKeys.contains(key)) return failure(u"The configuration schema contains an empty or duplicate key."_s);
             expectedKeys.push_back(key);
         }
     }
     if (reader.hasError() || expectedKeys.isEmpty()) return failure(u"Invalid wallpaper XML schema."_s);
-    xml.close(); // KConfigLoader opens the device itself.
+    xml.close();
+
+#ifdef WANIENGINE_HAS_KF6
     KConfigLoader loader(temporary.filePath(u"validationrc"_s),&xml);
     KConfigPropertyMap configuration(&loader);
     if (loader.items().size() != expectedKeys.size()) return failure(u"KDE did not recognize all configuration types."_s);
@@ -48,6 +52,8 @@ QJsonObject validateWallpaperPackage(const QString &source)
         return {};
     };
     if (const QString error = validateMap(); !error.isEmpty()) return failure(error);
+#endif
+
     QQmlEngine engine;
     QStringList warnings;
     QObject::connect(&engine,&QQmlEngine::warnings,&engine,[&](const QList<QQmlError> &errors) {
@@ -58,9 +64,20 @@ QJsonObject validateWallpaperPackage(const QString &source)
     if (wrapper.isError()) return failure(wrapper.errorString());
     QQmlComponent renderer(&engine,QUrl::fromLocalFile(source+u"/contents/ui/WallpaperContent.qml"_s));
     if (renderer.isError()) return failure(renderer.errorString());
+
+#ifdef WANIENGINE_HAS_KF6
     std::unique_ptr<QObject> object(renderer.createWithInitialProperties({{u"configuration"_s,QVariant::fromValue(&configuration)}}));
+#else
+    std::unique_ptr<QObject> object(renderer.createWithInitialProperties({{u"configuration"_s,QVariantMap{}}}));
+#endif
     if (!object) return failure(renderer.errorString());
-    if (const QString error = validateMap(); !error.isEmpty()) return failure(error);
     if (!warnings.isEmpty()) return failure(warnings.join('\n'));
+#ifdef WANIENGINE_HAS_KF6
     return {{u"ok"_s,true},{u"schemaKeys"_s,expectedKeys.size()},{u"qml"_s,u"compiled"_s},{u"config"_s,u"validated by KConfigLoader"_s}};
+#else
+    // Without KF6 we can still compile the QML and check the XML schema, but
+    // the KConfig-backed value/type validation is unavailable. Report that
+    // honestly instead of claiming the configuration was validated.
+    return {{u"ok"_s,true},{u"schemaKeys"_s,expectedKeys.size()},{u"qml"_s,u"compiled"_s},{u"config"_s,u"schema and QML only (KConfig unavailable)"_s}};
+#endif
 }

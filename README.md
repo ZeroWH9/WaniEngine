@@ -22,9 +22,9 @@ If WaniEngine is useful to you, consider starring the repository.
 
 ## Run WaniEngine
 
-WaniEngine currently supports Linux with KDE Plasma 6 on Wayland. It needs the host system's Qt 6/KDE libraries, LayerShellQt, the Qt Quick Controls and Layouts QML modules, `org.kde.taskmanager`, FFmpeg, and `ffprobe`. Python 3 is required to run the installer. The installer checks required tools and native library links before installing.
+WaniEngine supports **KDE Plasma 6 (Wayland)** and **GNOME** sessions. On GNOME the wallpaper is drawn through XWayland, so a GNOME session needs XWayland enabled. It needs the host system's Qt 6 libraries, Qt Quick Controls and Layouts QML modules, FFmpeg, and `ffprobe`. LayerShellQt and KDE Frameworks 6 KConfig are optional: when they are missing, KDE layer-shell overlays and KConfig-backed package validation are disabled instead of failing the build. Python 3 is required to run the installer. The installer checks required tools and native library links before installing.
 
-WaniEngine uses the Qt and KDE libraries provided by your system; it is not a self-contained AppImage. Hardware, graphics drivers, and available video codecs can affect playback.
+WaniEngine uses the Qt libraries provided by your system; it is not a self-contained AppImage. Hardware, graphics drivers, and available video codecs can affect playback.
 
 ### Install a release
 
@@ -37,9 +37,25 @@ To compile WaniEngine from source, install:
 - Rust/Cargo 1.88 or newer
 - C++20 compiler and CMake 3.26 or newer
 - Qt 6.8+ development packages: Core/Gui, QML/Quick, Quick Controls, Multimedia, DBus, Widgets, Network, OpenGL, Concurrent
-- LayerShellQt and KDE Frameworks 6 KConfig development files
+- Optional: LayerShellQt and KDE Frameworks 6 KConfig development files (auto-detected with `pkg-config`)
 
 Packaging the installer also requires Python 3 and `strip` from GNU binutils.
+
+On Ubuntu or Zorin OS, the host runtime dependencies can be installed with:
+
+```bash
+sudo apt update
+sudo apt install ffmpeg qt6-wayland \
+  libqt6core6 libqt6gui6 libqt6qml6 libqt6quick6 \
+  libqt6quickcontrols2-6 libqt6widgets6 libqt6network6 \
+  libqt6dbus6 libqt6opengl6 libqt6multimedia6 \
+  qml6-module-qtqml-workerscript qml6-module-qtquick-controls \
+  qml6-module-qtquick-layouts qml6-module-qtquick-templates
+```
+
+Install Rust with [rustup](https://rustup.rs/) if `cargo --version` is not
+available. When using VS Code as a Flatpak, build from a host terminal or make
+sure `~/.cargo/bin` is present in the terminal's `PATH`.
 
 ## Build from source
 
@@ -73,9 +89,10 @@ The desktop script starts its own isolated D-Bus, Wayland, KDE Plasma, and synth
 
 ## Roadmap
 
-### Planned
+### Completed
+- [x] Add desktop support beyond KDE Plasma, starting with GNOME Wayland and X11 sessions.
 
-- [ ] Add desktop support beyond KDE Plasma, starting with GNOME Wayland and X11 sessions.
+### Planned
 - [ ] Turn Discover into a wallpaper catalog that searches built-in sources automatically and supports user-configured sources.
 - [ ] Let users preview catalog wallpapers, review their source and license, and import selected wallpapers into their local library.
 

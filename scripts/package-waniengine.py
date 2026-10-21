@@ -17,13 +17,19 @@ parser.add_argument('--skip-build', action='store_true')
 parser.add_argument('--offline', action='store_true', help='build without accessing the network')
 parser.add_argument('--output', type=Path, default=root / 'output/waniengine')
 args = parser.parse_args()
+cargo = shutil.which('cargo')
+if cargo is None:
+    parser.error('Cargo was not found in PATH. Install Rust with rustup or add ~/.cargo/bin to PATH.')
+strip = shutil.which('strip')
+if strip is None:
+    parser.error('GNU strip was not found in PATH. Install binutils.')
 if not args.skip_build:
-    command = ['cargo', 'build', '--release', '-p', 'waniengine']
+    command = [cargo, 'build', '--release', '-p', 'waniengine']
     if args.offline:
         command.append('--offline')
     subprocess.run(command, cwd=root, check=True)
 metadata = json.loads(subprocess.check_output(
-    ['cargo', 'metadata', '--format-version', '1', '--no-deps'], cwd=root, text=True))
+    [cargo, 'metadata', '--format-version', '1', '--no-deps'], cwd=root, text=True))
 version = next(package['version'] for package in metadata['packages']
                if package['name'] == 'waniengine')
 binary = root / 'target/release/waniengine'
@@ -41,7 +47,7 @@ shutil.copy2(root / 'assets/waniengine.png', bundle / 'share/waniengine/waniengi
 shutil.copy2(root / 'scripts/install-waniengine.py', bundle / 'install-waniengine.py')
 # The system supplies Qt/KDE and multimedia; the matching custom QML module is bundled.
 for native in [bundle / 'bin/waniengine', *bundle.rglob('*.so')]:
-    subprocess.run(['strip', '--strip-unneeded', str(native)], check=True)
+    subprocess.run([strip, '--strip-unneeded', str(native)], check=True)
 files = {str(path.relative_to(bundle)): hashlib.sha256(path.read_bytes()).hexdigest()
          for path in sorted(bundle.rglob('*')) if path.is_file()}
 manifest = {'appId': 'org.waniengine.WaniEngine', 'version': version,

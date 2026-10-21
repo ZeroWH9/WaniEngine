@@ -28,7 +28,7 @@ bool RustSceneStore::saveScene(const QString &json) { try {waniengine::save_scen
 QString RustSceneStore::organizeAsset(const QString &json) { try {auto result=waniengine::organize_asset(rustString(m_root.toUtf8()),rustString(json.toUtf8()));error({});return qtString(result);}catch(const std::exception &e){error(QString::fromUtf8(e.what()));return u"{}"_s;} }
 QString RustSceneStore::addAudioFiles(const QString &asset,const QString &sources) { try {auto result=waniengine::add_audio(rustString(m_root.toUtf8()),rustString(asset.toUtf8()),rustString(sources.toUtf8()));error({});return qtString(result);}catch(const std::exception &e){error(QString::fromUtf8(e.what()));return u"[]"_s;} }
 bool RustSceneStore::openFolder(const QString &url) {return QDesktopServices::openUrl(QUrl(url));}
-QString RustSceneStore::libraryDirectory() const {return QDir(m_root).filePath(u"contents"_s);}
+QString RustSceneStore::libraryDirectory() const {const auto videos=QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);const auto folder=QDir(videos.isEmpty()?QDir::homePath()+u"/Videos"_s:videos).filePath(u"WaniEngine"_s);QDir().mkpath(folder);return folder;}
 QString RustSceneStore::describeMedia(const QString &source) const {return QString::fromUtf8(QJsonDocument(describeLocalMedia(QUrl(source),QDir(m_root).filePath(u"thumbnails"_s))).toJson(QJsonDocument::Compact));}
 QVariantList RustSceneStore::sampleLevels() const {
     QOpenGLContext context;QSurfaceFormat format;format.setRenderableType(QSurfaceFormat::OpenGL);format.setVersion(3,3);context.setFormat(format);if(!context.create())return {0};
