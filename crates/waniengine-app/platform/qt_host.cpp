@@ -54,8 +54,15 @@ int run_manager(rust::Str arguments,rust::Str runtime_root) {
     }
     if(options.contains(u"--quit"_s))return 0;
     QString stateHome=qEnvironmentVariable("XDG_STATE_HOME");if(stateHome.isEmpty())stateHome=QDir::homePath()+u"/.local/state"_s;
-    QString dataRoot=qEnvironmentVariable("WANIENGINE_DATA_ROOT");if(dataRoot.isEmpty())dataRoot=stateHome+u"/WaniEngine/waniengine/library"_s;
+    // The library lives in the user's Documents folder, which is localized by
+    // the desktop (Documentos, Documents, Dokumente...). Rust resolves it.
+    QString dataRoot=qEnvironmentVariable("WANIENGINE_DATA_ROOT");
+    if(dataRoot.isEmpty())dataRoot=waniEngineLibraryDirectory();
     const int dataIndex=options.indexOf(u"--data-dir"_s);if(dataIndex>=0)dataRoot=options.value(dataIndex+1);
+    // One-time absorb of the previous state directory. The legacy folder is
+    // copied, never moved, so nothing is lost if the new location breaks.
+    const QString legacyRoot=stateHome+u"/WaniEngine/waniengine/library"_s;
+    if(!qEnvironmentVariableIsSet("WANIENGINE_SKIP_MIGRATION")&&dataRoot!=legacyRoot)waniEngineMigrateLibrary(dataRoot,legacyRoot);
     QString installedScene=qEnvironmentVariable("WANIENGINE_INSTALLED_SCENE");if(installedScene.isEmpty())installedScene=stateHome+u"/WaniEngine/waniengine/library/scene.json"_s;
     RustSceneStore scene(dataRoot,installedScene);RustPlaylistStore playlists(dataRoot);VideoPreparation media;DesktopIntegration desktop;OverlayController overlays;ApplicationController controller(&desktop,socketPath);RustApplicationController application(&controller);ActorAudioController audio;NativeFilePicker picker;
     for(auto *widget:QApplication::allWidgets())if(auto *menu=qobject_cast<QMenu*>(widget))for(auto *action:menu->actions())if(action->objectName()==u"trayOpen"_s)action->setText(u"Open WaniEngine"_s);

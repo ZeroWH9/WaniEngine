@@ -6,6 +6,11 @@
 class QWindow;
 class ApplicationController;
 
+// Resolved in Rust so XDG_DOCUMENTS_DIR (localized by the desktop) is respected.
+QString waniEngineLibraryDirectory();
+// Copies projects from a previous library location without touching the origin.
+int waniEngineMigrateLibrary(const QString &root, const QString &legacy);
+
 // Thin Qt bindings; library and playlist storage are implemented in Rust.
 class RustSceneStore final : public QObject {
     Q_OBJECT

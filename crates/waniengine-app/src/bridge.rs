@@ -14,7 +14,18 @@ pub mod ffi {
         fn load_playlist(url: &str) -> Result<String>;
         fn save_playlist(url: &str, json: &str) -> Result<()>;
         fn set_autostart(enabled: bool, executable: &str) -> Result<()>;
+        fn library_directory() -> String;
+        fn migrate_library(root: &str, legacy: &str) -> Result<u32>;
     }
+}
+
+fn migrate_library(root: &str, legacy: &str) -> library::Result<u32> {
+    let migrated = LibraryStore::new(root, "").migrate_from(std::path::Path::new(legacy))?;
+    Ok(migrated as u32)
+}
+
+fn library_directory() -> String {
+    library::library_directory().to_string_lossy().into_owned()
 }
 
 fn load_scene(root: &str, source: &str) -> library::Result<String> {

@@ -21,6 +21,10 @@ namespace {
 QString qtString(const rust::String &string) { return QString::fromUtf8(string.data(),static_cast<qsizetype>(string.size())); }
 rust::Str rustString(const QByteArray &string) { return {string.constData(),static_cast<size_t>(string.size())}; }
 }
+QString waniEngineLibraryDirectory() { try {return qtString(waniengine::library_directory());}catch(const std::exception &e){qWarning("Library directory: %s",e.what());return QDir::homePath()+u"/WaniEngine"_s;} }
+
+int waniEngineMigrateLibrary(const QString &root,const QString &legacy) { try {return static_cast<int>(waniengine::migrate_library(rustString(root.toUtf8()),rustString(legacy.toUtf8())));}catch(const std::exception &e){qWarning("Library migration: %s",e.what());return 0;} }
+
 RustSceneStore::RustSceneStore(QString root,QString source,QObject *parent):QObject(parent),m_root(std::move(root)),m_source(std::move(source)){}
 void RustSceneStore::error(const QString &message) { if(m_error==message)return;m_error=message;emit lastErrorChanged(); }
 QString RustSceneStore::loadScene() { try {auto result=waniengine::load_scene(rustString(m_root.toUtf8()),rustString(m_source.toUtf8()));error({});return qtString(result);}catch(const std::exception &e){error(QString::fromUtf8(e.what()));return u"{}"_s;} }

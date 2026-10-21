@@ -16,36 +16,66 @@ fn home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-pub fn user_videos_directory() -> PathBuf {
-    let home = home_directory().unwrap_or_else(|| PathBuf::from("."));
+/// Read one `XDG_*_DIR` entry from `user-dirs.dirs`. The directory name is
+/// localized by the desktop (Documents, Documentos, Dokumente...), so it must
+/// never be hardcoded.
+fn user_dir(key: &str) -> Option<PathBuf> {
+    let home = home_directory()?;
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"))
         .join("user-dirs.dirs");
-
-    if let Ok(contents) = fs::read_to_string(config) {
-        for line in contents.lines() {
-            let Some(value) = line.strip_prefix("XDG_VIDEOS_DIR=") else {
-                continue;
-            };
-            let value = value
-                .trim()
-                .trim_matches('"')
-                .replace("$HOME", &home.to_string_lossy());
-            let path = PathBuf::from(value);
-            if path.is_absolute() {
-                return path.join("WaniEngine");
-            }
+    let contents = fs::read_to_string(config).ok()?;
+    let home_text = home.to_string_lossy().into_owned();
+    for line in contents.lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix(key) else {
+            continue;
+        };
+        let Some(value) = value.strip_prefix('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').replace("$HOME", &home_text);
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            return Some(path);
         }
     }
+    None
+}
 
-    let english = home.join("Videos");
-    let localized = home.join("Vídeos");
-    if english.is_dir() || !localized.is_dir() {
-        english.join("WaniEngine")
-    } else {
-        localized.join("WaniEngine")
-    }
+/// Managed library root: `$XDG_DOCUMENTS_DIR/WaniEngine`, localized per system
+/// language (Documentos on pt-BR, Documents on en-US, Dokumente on de-DE).
+pub fn library_directory() -> PathBuf {
+    let base = user_dir("XDG_DOCUMENTS_DIR")
+        .filter(|path| path.is_dir())
+        .or_else(|| {
+            let home = home_directory()?;
+            let english = home.join("Documents");
+            let localized = home.join("Documentos");
+            Some(if english.is_dir() || !localized.is_dir() {
+                english
+            } else {
+                localized
+            })
+        })
+        .or_else(|| home_directory())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("WaniEngine")
+}
+
+pub fn user_videos_directory() -> PathBuf {
+    let base = user_dir("XDG_VIDEOS_DIR").unwrap_or_else(|| {
+        let home = home_directory().unwrap_or_else(|| PathBuf::from("."));
+        let english = home.join("Videos");
+        let localized = home.join("Vídeos");
+        if english.is_dir() || !localized.is_dir() {
+            english
+        } else {
+            localized
+        }
+    });
+    base.join("WaniEngine")
 }
 
 fn is_supported_media(path: &Path) -> bool {
@@ -219,12 +249,20 @@ pub fn resolve_asset(reference: &Value) -> Result<Value> {
         return Err("Unsupported content configuration".into());
     }
     let folder = config_path.parent().ok_or("Invalid content folder")?;
-    let media = safe_relative(
-        folder,
-        config["media"]["file"]
-            .as_str()
-            .ok_or("Missing media file")?,
-    )?;
+    let media_file = config["media"]["file"]
+        .as_str()
+        .ok_or("Missing media file")?;
+    // A referenced video keeps its absolute path outside the folder. Anything
+    // else must stay inside the folder, which keeps the traversal guard intact.
+    let media = if config["media"]["referenced"].as_bool() == Some(true) {
+        let path = file_path(&format!("file://{media_file}"))?;
+        if !path.is_absolute() || !path.is_file() {
+            return Err("The referenced media file is unavailable".into());
+        }
+        path
+    } else {
+        safe_relative(folder, media_file)?
+    };
     let mut asset = config["properties"]
         .as_object()
         .cloned()
@@ -268,6 +306,63 @@ pub struct LibraryStore {
     pub installed_scene: PathBuf,
 }
 
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)?.flatten() {
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if from.is_dir() {
+            copy_directory(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn media_is_video(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v")
+    )
+}
+
+/// Package metadata stored next to the content configuration. This is the file
+/// a `.wani` archive ships as `project.json`.
+fn wallpaper_metadata(asset: &Value, media: &Path, referenced: bool) -> Result<Value> {
+    Ok(json!({
+        "format": "waniengine-wallpaper",
+        "schema": 1,
+        "id": asset["id"],
+        "title": asset["name"],
+        "kind": asset["kind"],
+        "media": {
+            "file": media.to_string_lossy(),
+            "referenced": referenced,
+            "original": asset["originalSource"],
+        },
+        "playback": {
+            "speed": asset["speed"],
+            "volume": asset["volume"],
+            "fit": asset["fit"],
+        }
+    }))
+}
+
+/// Content configuration whose `media.file` may point outside the folder when
+/// the media is referenced instead of copied.
+fn content_configuration_referenced(asset: &Value, folder: &Path, media: &Path) -> Result<Value> {
+    let mut config = content_configuration(asset, folder)?;
+    if !media.starts_with(folder) {
+        config["media"]["file"] = json!(media.to_string_lossy());
+        config["media"]["referenced"] = json!(true);
+    }
+    Ok(config)
+}
+
 fn content_configuration(asset: &Value, folder: &Path) -> Result<Value> {
     let mut media = serde_json::Map::new();
     for key in [
@@ -277,13 +372,20 @@ fn content_configuration(asset: &Value, folder: &Path) -> Result<Value> {
             media.insert(key.into(), value.clone());
         }
     }
+    // Audio always lives inside the content folder; media may be referenced
+    // from outside it when the user keeps a large video in place.
     let relative = |url: &str| -> Result<String> {
         let path = file_path(url)?;
         Ok(path.strip_prefix(folder)?.to_string_lossy().into_owned())
     };
+    let media_url = asset["url"].as_str().ok_or("Missing media URL")?;
+    let media_path = file_path(media_url)?;
     media.insert(
         "file".into(),
-        json!(relative(asset["url"].as_str().ok_or("Missing media URL")?)?),
+        match media_path.strip_prefix(folder) {
+            Ok(inside) => json!(inside.to_string_lossy()),
+            Err(_) => json!(media_path.to_string_lossy()),
+        },
     );
     if let Some(url) = asset["thumbnailUrl"].as_str() {
         if let Ok(path) = relative(url) {
@@ -420,6 +522,40 @@ impl LibraryStore {
         write_json(&self.root.join("scene.json"), &state)
     }
 
+    /// Absorb projects from a previous library location into this store.
+    ///
+    /// This only ever copies: the old folder stays untouched so a failed or
+    /// partial migration can never lose the user's content. Returns the number
+    /// of projects created.
+    pub fn migrate_from(&self, legacy: &Path) -> Result<usize> {
+        let contents = legacy.join("contents");
+        if !contents.is_dir() {
+            return Ok(0);
+        }
+        fs::create_dir_all(&self.root)?;
+        let mut migrated = 0;
+        for entry in fs::read_dir(&contents)?.flatten() {
+            let project = entry.path();
+            if !project.is_dir() {
+                continue;
+            }
+            let config = project.join("content.json");
+            let Ok(value) = read_json(&config) else {
+                continue;
+            };
+            // Already present in the new library? Skip instead of duplicating.
+            let name = value["name"].as_str().unwrap_or("Content");
+            let destination = self.root.join("contents").join(name);
+            if destination.exists() {
+                continue;
+            }
+            if copy_directory(&project, &destination).is_ok() {
+                migrated += 1;
+            }
+        }
+        Ok(migrated)
+    }
+
     pub fn organize(&self, mut asset: Value) -> Result<Value> {
         let source = file_path(asset["url"].as_str().ok_or("Missing source URL")?)?;
         if !source.is_file() {
@@ -454,20 +590,37 @@ impl LibraryStore {
             number += 1;
         }
         fs::create_dir(&folder)?;
-        let destination = folder.join(source.file_name().ok_or("Invalid source filename")?);
-        if let Err(error) = fs::copy(&source, &destination) {
-            let _ = fs::remove_dir(&folder);
-            return Err(error.into());
-        }
         asset["id"] = json!(format!(
             "rust-{}-{}",
             std::process::id(),
             NEXT_FILE.fetch_add(1, Ordering::Relaxed)
         ));
         asset["originalSource"] = asset["url"].clone();
-        asset["url"] = json!(file_url(&destination));
         asset["folderUrl"] = json!(file_url(&folder));
         asset["configUrl"] = json!(file_url(&folder.join("content.json")));
+
+        // Images and animations are small, so they are copied into the project
+        // and stay portable. Video is referenced in place: copying multi-GB
+        // files into the library used to duplicate media for no reason.
+        let is_video = media_is_video(&source);
+        let media_path = if is_video {
+            source.clone()
+        } else {
+            let target_folder = folder.join("source");
+            fs::create_dir_all(&target_folder)?;
+            let destination =
+                target_folder.join(source.file_name().ok_or("Invalid source filename")?);
+            if let Err(error) = fs::copy(&source, &destination) {
+                let _ = fs::remove_dir_all(&folder);
+                return Err(error.into());
+            }
+            destination
+        };
+        asset["url"] = json!(file_url(&media_path));
+        asset["referenced"] = json!(is_video);
+        if !asset["audio"].is_object() {
+            asset["audio"] = json!({"enabled":false,"files":[]});
+        }
         if let Some(thumbnail) = asset["thumbnailUrl"]
             .as_str()
             .and_then(|s| file_path(s).ok())
@@ -477,13 +630,12 @@ impl LibraryStore {
                 asset["thumbnailUrl"] = json!(file_url(&target));
             }
         }
-        if !asset["audio"].is_object() {
-            asset["audio"] = json!({"enabled":false,"files":[]});
-        }
         write_json(
-            &folder.join("content.json"),
-            &content_configuration(&asset, &folder)?,
+            &folder.join("wallpaper.json"),
+            &wallpaper_metadata(&asset, &media_path, is_video)?,
         )?;
+        let config = content_configuration_referenced(&asset, &folder, &media_path)?;
+        write_json(&folder.join("content.json"), &config)?;
         Ok(asset)
     }
 
@@ -694,6 +846,112 @@ mod tests {
             .expect("video discovered");
         assert_eq!(clip["video"], true);
         assert_eq!(clip["kind"], "wallpaper");
+    }
+
+    #[test]
+    fn image_is_copied_into_the_project_folder() {
+        let t = Temp::new();
+        fs::write(t.0.join("aura.png"), b"png").unwrap();
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        let asset = store
+            .organize(json!({"url":file_url(&t.0.join("aura.png")),"name":"Aura","kind":"wallpaper"}))
+            .unwrap();
+        let media = file_path(asset["url"].as_str().unwrap()).unwrap();
+        assert!(media.starts_with(store.root.join("contents/Aura/source")), "{media:?}");
+        assert!(media.is_file());
+        assert_eq!(asset["referenced"], false);
+    }
+
+    #[test]
+    fn video_is_referenced_instead_of_duplicated() {
+        let t = Temp::new();
+        fs::write(t.0.join("rain.mp4"), b"mp4").unwrap();
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        let asset = store
+            .organize(json!({"url":file_url(&t.0.join("rain.mp4")),"name":"Rain","kind":"wallpaper"}))
+            .unwrap();
+        let media = file_path(asset["url"].as_str().unwrap()).unwrap();
+        assert_eq!(media, t.0.join("rain.mp4"), "video must not be copied");
+        assert_eq!(asset["referenced"], true);
+        let project = store.root.join("contents/Rain");
+        assert!(!project.join("source/rain.mp4").exists(), "no duplicated video");
+        let metadata = read_json(&project.join("wallpaper.json")).unwrap();
+        assert_eq!(metadata["format"], "waniengine-wallpaper");
+        assert_eq!(metadata["media"]["referenced"], true);
+        assert_eq!(metadata["title"], "Rain");
+    }
+
+    #[test]
+    fn referenced_video_survives_asset_resolution() {
+        let t = Temp::new();
+        fs::write(t.0.join("rain.webm"), b"webm").unwrap();
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        let asset = store
+            .organize(json!({"url":file_url(&t.0.join("rain.webm")),"name":"Rain","kind":"wallpaper"}))
+            .unwrap();
+        let resolved = resolve_asset(&json!({"configUrl":asset["configUrl"]})).unwrap();
+        assert_eq!(resolved["url"], file_url(&t.0.join("rain.webm")));
+        assert!(file_path(resolved["url"].as_str().unwrap()).unwrap().is_file());
+    }
+
+    #[test]
+    fn migration_copies_projects_and_keeps_the_legacy_folder() {
+        let t = Temp::new();
+        let legacy = t.0.join("legacy");
+        let project = legacy.join("contents/Remilia");
+        fs::create_dir_all(&project).unwrap();
+        write_json(
+            &project.join("content.json"),
+            &json!({"format":"waniengine-content","version":1,"id":"old","name":"Remilia","kind":"wallpaper"}),
+        )
+        .unwrap();
+        fs::write(project.join("remilia.mp4"), b"mp4").unwrap();
+
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        assert_eq!(store.migrate_from(&legacy).unwrap(), 1);
+        assert!(store.root.join("contents/Remilia/content.json").is_file());
+        assert!(store.root.join("contents/Remilia/remilia.mp4").is_file());
+        // The origin is never modified or removed.
+        assert!(project.join("content.json").is_file());
+        assert!(project.join("remilia.mp4").is_file());
+        // Running it twice must not duplicate the project.
+        assert_eq!(store.migrate_from(&legacy).unwrap(), 0);
+    }
+
+    #[test]
+    fn migration_of_a_missing_legacy_folder_is_a_noop() {
+        let t = Temp::new();
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        assert_eq!(store.migrate_from(&t.0.join("nope")).unwrap(), 0);
+        assert!(!store.root.join("contents").exists());
+    }
+
+    #[test]
+    fn referenced_media_cannot_escape_through_relative_paths() {
+        let t = Temp::new();
+        let folder = t.0.join("contents/Evil");
+        fs::create_dir_all(&folder).unwrap();
+        for hostile in ["../../etc/passwd", "..", "./relative.mp4", "dir/../x.mp4"] {
+            write_json(
+                &folder.join("content.json"),
+                &json!({"format":"waniengine-content","version":1,"id":"x","name":"Evil","kind":"wallpaper",
+                        "media":{"file":hostile,"referenced":true}}),
+            )
+            .unwrap();
+            let resolved = resolve_asset(&json!({"configUrl":file_url(&folder.join("content.json"))}));
+            assert!(resolved.is_err(), "{hostile} must be rejected");
+        }
+    }
+
+    #[test]
+    fn library_directory_respects_localized_documents_folder() {
+        let home = PathBuf::from("$HOME");
+        let _ = home;
+        // Falls back to an absolute documents folder and never returns a
+        // relative path, regardless of the system language.
+        let directory = library_directory();
+        assert!(directory.is_absolute());
+        assert_eq!(directory.file_name().unwrap(), "WaniEngine");
     }
 
     #[test]
