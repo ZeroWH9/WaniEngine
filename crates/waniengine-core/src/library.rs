@@ -1,6 +1,6 @@
 //! Compatible library storage for the Rust manager. Installed content is read-only;
 //! edits, imports and playlists belong to the manager's separate data directory.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
@@ -11,6 +11,106 @@ use std::{
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 const MAX_JSON: u64 = 16 * 1024 * 1024;
+
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+pub fn user_videos_directory() -> PathBuf {
+    let home = home_directory().unwrap_or_else(|| PathBuf::from("."));
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("user-dirs.dirs");
+
+    if let Ok(contents) = fs::read_to_string(config) {
+        for line in contents.lines() {
+            let Some(value) = line.strip_prefix("XDG_VIDEOS_DIR=") else {
+                continue;
+            };
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .replace("$HOME", &home.to_string_lossy());
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                return path.join("WaniEngine");
+            }
+        }
+    }
+
+    let english = home.join("Videos");
+    let localized = home.join("Vídeos");
+    if english.is_dir() || !localized.is_dir() {
+        english.join("WaniEngine")
+    } else {
+        localized.join("WaniEngine")
+    }
+}
+
+fn is_supported_media(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase()),
+        Some(extension) if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "apng" | "bmp" | "svg" | "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v")
+    )
+}
+
+fn media_kind(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("gif" | "apng") => "character",
+        _ => "wallpaper",
+    }
+}
+
+fn discover_media(root: &Path) -> Vec<Value> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_supported_media(path))
+        .map(|path| {
+            let name = path
+                .file_stem()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Content".into());
+            let video = matches!(
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.to_ascii_lowercase())
+                    .as_deref(),
+                Some("mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v")
+            );
+            json!({
+                "id": format!("file-{}", path.to_string_lossy()),
+                "url": file_url(&path),
+                "originalSource": file_url(&path),
+                "name": name,
+                "kind": media_kind(&path),
+                "video": video,
+                "favorite": false,
+                "addedAt": 0,
+                "speed": 100,
+                "posX": 50,
+                "posY": 96,
+                "opacity": 100,
+                "flipX": false,
+                "scale": 100,
+                "volume": 50,
+                "muted": true,
+                "fit": "cover"
+            })
+        })
+        .collect()
+}
 
 pub fn file_path(url: &str) -> Result<PathBuf> {
     let path = if let Some(rest) = url.strip_prefix("file://") {
@@ -267,6 +367,18 @@ impl LibraryStore {
                 }
             }
         }
+        let known_urls: std::collections::HashSet<String> = assets
+            .iter()
+            .filter_map(|asset| asset["url"].as_str().map(str::to_owned))
+            .collect();
+        for asset in discover_media(&user_videos_directory()) {
+            if asset["url"]
+                .as_str()
+                .is_some_and(|url| !known_urls.contains(url))
+            {
+                assets.push(asset);
+            }
+        }
         state["assets"] = json!(assets);
         state["schema"] = json!(2);
         // The preview must not install an autostart entry merely because the old app did.
@@ -311,96 +423,23 @@ impl LibraryStore {
         if asset["configUrl"].is_string() {
             return Ok(asset);
         }
-        let raw_name = asset["name"].as_str().unwrap_or("Content");
-        let name: String = raw_name
-            .chars()
-            .take(100)
-            .map(|c| {
-                if c.is_control() || "\\/:*?\"<>|".contains(c) {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        let name = if name.trim().is_empty() || [".", ".."].contains(&name.as_str()) {
-            "Content"
-        } else {
-            name.trim()
-        };
-        let library = self.root.join("contents");
-        fs::create_dir_all(&library)?;
-        let mut folder = library.join(name);
-        let mut number = 2;
-        while folder.exists() {
-            folder = library.join(format!("{name} ({number})"));
-            number += 1;
-        }
-        fs::create_dir(&folder)?;
-        let destination = folder.join(source.file_name().ok_or("Invalid source filename")?);
-        if let Err(error) = fs::copy(&source, &destination) {
-            let _ = fs::remove_dir(&folder);
-            return Err(error.into());
-        }
         asset["id"] = json!(format!(
             "rust-{}-{}",
             std::process::id(),
             NEXT_FILE.fetch_add(1, Ordering::Relaxed)
         ));
         asset["originalSource"] = asset["url"].clone();
-        asset["url"] = json!(file_url(&destination));
-        asset["folderUrl"] = json!(file_url(&folder));
-        asset["configUrl"] = json!(file_url(&folder.join("content.json")));
-        if let Some(thumbnail) = asset["thumbnailUrl"]
-            .as_str()
-            .and_then(|s| file_path(s).ok())
-        {
-            let target = folder.join("preview.png");
-            if fs::copy(thumbnail, &target).is_ok() {
-                asset["thumbnailUrl"] = json!(file_url(&target));
-            }
-        }
         if !asset["audio"].is_object() {
             asset["audio"] = json!({"enabled":false,"files":[]});
         }
-        write_json(
-            &folder.join("content.json"),
-            &content_configuration(&asset, &folder)?,
-        )?;
         Ok(asset)
     }
 
-    pub fn add_audio(&self, asset: &Value, sources: &[Value]) -> Result<Value> {
-        let mut tracks = asset["audio"]["files"]
+    pub fn add_audio(&self, _asset: &Value, sources: &[Value]) -> Result<Value> {
+        let mut tracks = _asset["audio"]["files"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let identity = asset["id"]
-            .as_str()
-            .unwrap_or("character")
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || "-_".contains(c) {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        let content_folder = asset["folderUrl"]
-            .as_str()
-            .and_then(|url| file_path(url).ok());
-        let folder = match content_folder {
-            Some(folder)
-                if folder
-                    .canonicalize()?
-                    .starts_with(self.root.canonicalize()?) =>
-            {
-                folder.join("audio")
-            }
-            _ => self.root.join("audio").join(identity),
-        };
-        fs::create_dir_all(&folder)?;
         for source in sources {
             let source = file_path(source.as_str().ok_or("Invalid audio URL")?)?;
             let extension = source
@@ -411,17 +450,8 @@ impl LibraryStore {
             if !["wav", "mp3", "ogg", "flac", "m4a", "aac", "opus"].contains(&extension.as_str()) {
                 return Err("Unsupported audio format".into());
             }
-            let mut target = folder.join(source.file_name().ok_or("Invalid audio filename")?);
-            let mut index = 2;
-            while target.exists() {
-                target = folder.join(format!(
-                    "{}-{index}.{extension}",
-                    source.file_stem().unwrap().to_string_lossy()
-                ));
-                index += 1;
-            }
-            fs::copy(&source, &target)?;
-            tracks.push(json!({"name":target.file_name().unwrap().to_string_lossy(),"url":file_url(&target),"file":target.strip_prefix(&self.root)?.to_string_lossy(),"playback":{"enabled":true,"mode":"once","volume":100,"intervalSeconds":30,"radiusPixels":40,"cooldownSeconds":2}}));
+            let name = source.file_name().ok_or("Invalid audio filename")?;
+            tracks.push(json!({"name":name.to_string_lossy(),"url":file_url(&source),"file":file_url(&source),"playback":{"enabled":true,"mode":"once","volume":100,"intervalSeconds":30,"radiusPixels":40,"cooldownSeconds":2}}));
         }
         Ok(json!(tracks))
     }
@@ -440,10 +470,7 @@ fn validate_playlist(value: &Value) -> Result<()> {
     let assets = value["assets"]
         .as_array()
         .ok_or("Missing playlist assets")?;
-    if value["format"] != "waniengine-playlist"
-        || value["version"] != 1
-        || assets.len() > 1000
-    {
+    if value["format"] != "waniengine-playlist" || value["version"] != 1 || assets.len() > 1000 {
         return Err("Unsupported playlist format".into());
     }
     for asset in assets {
@@ -521,7 +548,7 @@ mod tests {
         assert_eq!(s["assets"][0]["missing"], true);
     }
     #[test]
-    fn import_and_audio_copy_keep_originals() {
+    fn import_and_audio_references_keep_originals() {
         let t = Temp::new();
         fs::write(t.0.join("a.gif"), b"gif").unwrap();
         fs::write(t.0.join("a.wav"), b"wav").unwrap();
@@ -529,10 +556,9 @@ mod tests {
         let asset = store
             .organize(json!({"url":file_url(&t.0.join("a.gif")),"name":"A","kind":"character"}))
             .unwrap();
-        assert!(
-            file_path(asset["url"].as_str().unwrap())
-                .unwrap()
-                .starts_with(&store.root)
+        assert_eq!(
+            file_path(asset["url"].as_str().unwrap()).unwrap(),
+            t.0.join("a.gif")
         );
         let tracks = store
             .add_audio(&asset, &[json!(file_url(&t.0.join("a.wav")))])
@@ -541,17 +567,14 @@ mod tests {
         assert!(t.0.join("a.gif").is_file());
         assert!(t.0.join("a.wav").is_file());
         let mut saved_asset = asset.clone();
-        saved_asset["audio"]["files"] = tracks;
+        saved_asset["audio"]["files"] = tracks.clone();
         saved_asset["scale"] = json!(75);
         store.save_scene(json!({"assets":[saved_asset]})).unwrap();
-        let resolved = resolve_asset(&json!({"configUrl":asset["configUrl"]})).unwrap();
-        assert_eq!(resolved["scale"], 75);
-        assert_eq!(read_json(&file_path(asset["configUrl"].as_str().unwrap()).unwrap()).unwrap()["format"], "waniengine-content");
-        assert!(
-            file_path(resolved["audio"]["files"][0]["url"].as_str().unwrap())
-                .unwrap()
-                .is_file()
-        );
+        assert_eq!(asset["url"], file_url(&t.0.join("a.gif")));
+        assert_eq!(saved_asset["scale"], 75);
+        assert!(file_path(tracks[0]["url"].as_str().unwrap())
+            .unwrap()
+            .is_file());
     }
     #[test]
     fn playlist_round_trip_and_validation() {

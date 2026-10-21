@@ -59,7 +59,9 @@ QString normalizedColor(const QString &value)
 }
 
 PlasmaIntegration::PlasmaIntegration(QObject *parent, Mode mode)
-    : QObject(parent), m_sessionPath(QStandardPaths::writableLocation(QStandardPaths::StateLocation) + u"/plasma-session.json"_s), m_mode(mode)
+    : QObject(parent),
+      m_sessionPath((qEnvironmentVariableIsEmpty("XDG_STATE_HOME") ? QDir::homePath() + u"/.local/state"_s : qEnvironmentVariable("XDG_STATE_HOME")) + u"/WaniEngine/plasma-session.json"_s),
+      m_mode(mode)
 {
     if (auto *gui = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
         auto trackScreen=[this](QScreen*screen){connect(screen,&QScreen::refreshRateChanged,this,&PlasmaIntegration::monitorsChanged);connect(screen,&QScreen::geometryChanged,this,&PlasmaIntegration::monitorsChanged);};
@@ -177,7 +179,7 @@ QString PlasmaIntegration::ensurePluginInstalled()
     // Every immutable wallpaper build has its own QML namespace, so Qt can keep
     // older cached packages alive while the new package is installed.
     QSaveFile module(QDir(staging.path()).filePath(u"contents/ui/runtime/qmldir"_s));
-    if(!module.open(QIODevice::WriteOnly)||module.write((u"module %1.Runtime\nplugin waniengine_runtime\n"_s.arg(plugin)).toUtf8())<0||!module.commit()){
+    if(!module.open(QIODevice::WriteOnly)||module.write("plugin waniengine_runtime\n")<0||!module.commit()){
         setError(u"Could not install the media module."_s);return {};
     }
     const QString metadataPath = QDir(staging.path()).filePath(u"metadata.json"_s);

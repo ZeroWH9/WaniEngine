@@ -1,5 +1,5 @@
 #include "application_controller.h"
-#include "plasma_integration.h"
+#include "desktop_integration.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -14,6 +14,7 @@
 #include <QLocalSocket>
 #include <QSocketNotifier>
 #include <QWindow>
+#include <QQuickWindow>
 #include <csignal>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -28,8 +29,8 @@ void handleTermination(int signal)
 }
 }
 
-ApplicationController::ApplicationController(PlasmaIntegration *integration, const QString &socketPath, QObject *parent)
-    : QObject(parent), m_integration(integration), m_tray(QIcon(u":/icons/waniengine.png"_s)),
+ApplicationController::ApplicationController(DesktopIntegration *integration, const QString &socketPath, QObject *parent)
+    : QObject(parent), m_integration(integration), m_socketPath(socketPath), m_tray(QIcon(u":/icons/waniengine.png"_s)),
       m_watcher(new QDBusServiceWatcher(u"org.kde.StatusNotifierWatcher"_s,QDBusConnection::sessionBus(),
                                       QDBusServiceWatcher::WatchForOwnerChange,this))
 {
@@ -79,6 +80,9 @@ ApplicationController::ApplicationController(PlasmaIntegration *integration, con
 }
 ApplicationController::~ApplicationController()
 {
+    m_tray.hide();
+    m_server.close();
+    if (!m_socketPath.isEmpty()) QLocalServer::removeServer(m_socketPath);
     signalWriteFd = -1;
     std::signal(SIGTERM,SIG_DFL);
     std::signal(SIGINT,SIG_DFL);
@@ -96,9 +100,15 @@ void ApplicationController::updateTrayAvailability()
 void ApplicationController::requestOpen()
 {
     if (!m_window) return;
+    if (auto *quickWindow = qobject_cast<QQuickWindow *>(m_window)) {
+        quickWindow->setPersistentGraphics(true);
+        quickWindow->setPersistentSceneGraph(true);
+    }
     if (m_window->visibility()==QWindow::Minimized) m_window->showNormal(); else m_window->show();
+    m_window->setVisible(true);
     m_window->raise();
     m_window->requestActivate();
+    m_window->requestUpdate();
 }
 void ApplicationController::closeWindow(bool closeToTray)
 {
@@ -110,6 +120,7 @@ void ApplicationController::closeWindow(bool closeToTray)
 }
 void ApplicationController::requestExit()
 {
+    m_tray.hide();
     if (!m_integration->restore())
         qWarning().noquote() << "The desktop recovery process will retry:" << m_integration->lastError();
     QCoreApplication::quit();

@@ -1,7 +1,9 @@
 #include "runtime_paths.h"
 #include <QQmlEngine>
 #include "overlay_controller.h"
+#ifdef WANIENGINE_HAS_LAYER_SHELL_QT
 #include <LayerShellQt/Window>
+#endif
 #include <QGuiApplication>
 #include <QProcessEnvironment>
 #include <QDebug>
@@ -61,15 +63,25 @@ bool OverlayController::applyActors(const QString &json,const QString &monitor){
     const auto document=QJsonDocument::fromJson(json.toUtf8());
     if(!document.isArray() || !validActors(document.array())){error(u"Use up to 16 local images or GIFs, at most 2048 × 2048 pixels."_s);return false;}
     if(document.array().isEmpty()){clear();error({});return true;}
-    if(QGuiApplication::platformName()!=u"wayland"_s){error(u"Click-through overlays require a Wayland session."_s);return false;}
+
+    const bool isKde = qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains(u"KDE"_s);
+    if(isKde && QGuiApplication::platformName()!=u"wayland"_s){
+        error(u"KDE overlays require a Wayland session."_s);
+        return false;
+    }
     QScreen *target=nullptr;
     for(auto *screen:QGuiApplication::screens())if(screen->name()==monitor)target=screen;
     if(!target){error(u"The animation monitor is disconnected."_s);return false;}
     if(active() && monitor!=m_monitor)clear();
     if(!active()){
         auto environment=QProcessEnvironment::systemEnvironment();
-        environment.insert(u"QT_QPA_PLATFORM"_s,u"wayland"_s);
-        environment.insert(u"QT_WAYLAND_SHELL_INTEGRATION"_s,u"layer-shell"_s);
+        if(isKde) {
+            environment.insert(u"QT_QPA_PLATFORM"_s,u"wayland"_s);
+            environment.insert(u"QT_WAYLAND_SHELL_INTEGRATION"_s,u"layer-shell"_s);
+        } else {
+            // For GNOME / XWayland / X11 sessions, use XCB for click-through transparent top-level windows
+            environment.insert(u"QT_QPA_PLATFORM"_s,u"xcb"_s);
+        }
         m_worker.setProcessEnvironment(environment);
         m_worker.start(QCoreApplication::applicationFilePath(),{u"--overlay-worker"_s,monitor});
         if(!m_worker.waitForStarted(3000)){error(u"Could not start the animation renderer."_s);return false;}
@@ -80,31 +92,43 @@ bool OverlayController::applyActors(const QString &json,const QString &monitor){
     if(!m_worker.waitForBytesWritten(1000)){error(u"The renderer did not receive the configuration."_s);clear();return false;}
     QByteArray reply;
     for(int i=0;i<40 && !reply.contains("READY");++i){m_worker.waitForReadyRead(100);reply+=m_worker.readAllStandardOutput();if(m_worker.state()==QProcess::NotRunning)break;}
-    if(!reply.contains("READY")){clear();error(u"The compositor did not confirm the Wayland overlay."_s);return false;}
+    if(!reply.contains("READY")){clear();error(u"The compositor did not confirm the overlay."_s);return false;}
     error({});emit activeChanged();return true;
 }
 int OverlayController::runWorker(int argc,char **argv){
     QGuiApplication app(argc,argv);
     app.setApplicationName(u"waniengine-actors"_s);
-    if(app.platformName()!=u"wayland"_s)return 2;
     QScreen *screen=nullptr;
     for(auto *candidate:app.screens())if(candidate->name()==app.arguments().value(2))screen=candidate;
+    if(!screen && !app.screens().isEmpty()) screen = app.screens().first();
     if(!screen)return 3;
     QQuickView view;
     view.engine()->addImportPath(waniEngineRuntimeRoot());
     view.setTitle(u"WaniEngine — animations"_s);
-    view.setFlags(Qt::FramelessWindowHint|Qt::WindowTransparentForInput|Qt::WindowDoesNotAcceptFocus);
+    view.setFlags(Qt::FramelessWindowHint|Qt::WindowTransparentForInput|Qt::WindowDoesNotAcceptFocus|Qt::WindowStaysOnTopHint);
     view.setColor(Qt::transparent);
     view.setResizeMode(QQuickView::SizeRootObjectToView);
     view.setScreen(screen);
-    auto *layer=LayerShellQt::Window::get(&view);
-    layer->setLayer(LayerShellQt::Window::LayerOverlay);
-    layer->setAnchors(LayerShellQt::Window::Anchors(LayerShellQt::Window::AnchorTop)|LayerShellQt::Window::AnchorBottom|LayerShellQt::Window::AnchorLeft|LayerShellQt::Window::AnchorRight);
-    layer->setExclusiveZone(-1);
-    layer->setKeyboardInteractivity(LayerShellQt::Window::KeyboardInteractivityNone);
-    layer->setActivateOnShow(false);
-    layer->setScope(u"waniengine-actors"_s);
-    layer->setScreen(screen);
+    view.setGeometry(screen->geometry());
+
+#ifdef WANIENGINE_HAS_LAYER_SHELL_QT
+    if (app.platformName() == u"wayland"_s) {
+        auto *layer=LayerShellQt::Window::get(&view);
+        if (layer) {
+            layer->setLayer(LayerShellQt::Window::LayerOverlay);
+            layer->setAnchors(LayerShellQt::Window::Anchors(LayerShellQt::Window::AnchorTop)|LayerShellQt::Window::AnchorBottom|LayerShellQt::Window::AnchorLeft|LayerShellQt::Window::AnchorRight);
+            layer->setExclusiveZone(-1);
+            layer->setKeyboardInteractivity(LayerShellQt::Window::KeyboardInteractivityNone);
+            layer->setActivateOnShow(false);
+            layer->setScope(u"waniengine-actors"_s);
+            layer->setScreen(screen);
+        }
+    }
+#endif
+    if (app.platformName() == u"xcb"_s) {
+        view.setProperty("_q_xcb_wm_window_type", "_NET_WM_WINDOW_TYPE_UTILITY");
+    }
+
     view.resize(screen->size());
     view.setSource(QUrl(u"qrc:/qt/qml/WaniEngineManager/qml/ActorScene.qml"_s));
     if(view.status()!=QQuickView::Ready)return 4;

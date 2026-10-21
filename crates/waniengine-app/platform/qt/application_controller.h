@@ -3,8 +3,9 @@
 #include <QLocalServer>
 #include <QMenu>
 #include <QSystemTrayIcon>
+#include <QString>
 
-class PlasmaIntegration;
+class DesktopIntegration;
 class QWindow;
 class QDBusServiceWatcher;
 class QSocketNotifier;
@@ -15,7 +16,7 @@ class ApplicationController final : public QObject
     Q_PROPERTY(bool managerActive READ managerActive NOTIFY managerActiveChanged)
     Q_PROPERTY(bool trayAvailable READ trayAvailable NOTIFY trayAvailabilityChanged)
 public:
-    explicit ApplicationController(PlasmaIntegration *integration, const QString &socketPath, QObject *parent = nullptr);
+    explicit ApplicationController(DesktopIntegration *integration, const QString &socketPath, QObject *parent = nullptr);
     ~ApplicationController() override;
     bool trayAvailable() const;
     bool managerActive() const;
@@ -28,8 +29,9 @@ signals:
     void managerActiveChanged();
 private:
     void updateTrayAvailability();
-    PlasmaIntegration *m_integration;
+    DesktopIntegration *m_integration;
     QWindow *m_window = nullptr;
+    QString m_socketPath;
     QSystemTrayIcon m_tray;
     QMenu m_menu;
     QLocalServer m_server;

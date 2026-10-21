@@ -10,8 +10,8 @@
 #include <algorithm>
 using namespace Qt::StringLiterals;
 namespace {class OwnedTextureNode : public QSGSimpleTextureNode {public: ~OwnedTextureNode() override {delete texture();}};}
-FrameClock::FrameClock(QObject *parent):QObject(parent){m_elapsed.start();m_timer.setTimerType(Qt::PreciseTimer);setFps(60);connect(&m_timer,&QChronoTimer::timeout,this,&FrameClock::tick);}
-void FrameClock::setFps(int value){value=std::clamp(value,15,1000);m_fps=value;m_timer.setInterval(std::chrono::nanoseconds((1000000000LL+value-1)/value));emit fpsChanged();}
+FrameClock::FrameClock(QObject *parent):QObject(parent){m_elapsed.start();m_timer.setTimerType(Qt::PreciseTimer);setFps(60);connect(&m_timer,&QTimer::timeout,this,&FrameClock::tick);}
+void FrameClock::setFps(int value){value=std::clamp(value,15,1000);m_fps=value;m_timer.setInterval(std::max(1, 1000/value));emit fpsChanged();}
 void FrameClock::setRunning(bool value){if(value==running())return;if(value)m_timer.start();else m_timer.stop();emit runningChanged();}
 VideoFrameLimiter::VideoFrameLimiter(QObject *parent):QObject(parent){
     connect(&m_input,&QVideoSink::videoFrameChanged,this,[this](const QVideoFrame&frame){

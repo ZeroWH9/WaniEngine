@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtMultimedia
-import org.kde.taskmanager as TaskManager
 import WaniEngine.Runtime 1.0 as Engine
 
 ApplicationWindow {
@@ -164,7 +163,7 @@ ApplicationWindow {
             if(typeof sceneStore.describeMedia === "function") Object.assign(item,JSON.parse(sceneStore.describeMedia(url)))
             if (typeof sceneStore.organizeAsset === "function") {
                 item = JSON.parse(sceneStore.organizeAsset(JSON.stringify(item)))
-                if (!item.url) {showStatus("Could not copy this file into the library.");continue}
+                if (!item.url) {showStatus("Could not add this file to the library.");continue}
             }
             next.push(item)
             if (firstAdded.length === 0)
@@ -614,6 +613,15 @@ ApplicationWindow {
         }
     }
 
+    function reloadLibrary() {
+        const previousUrl = selectedUrl
+        saveState()
+        restoreState()
+        if (assets.some(asset => asset.url === previousUrl))
+            selectedUrl = previousUrl
+        showStatus("Library reloaded.")
+    }
+
     property var actorUrls: []
     property var restoredActorUrls: []
     property bool shuttingDown: false
@@ -690,26 +698,7 @@ ApplicationWindow {
         })
     }
     function updateWindowPolicy() {
-        let paused=false
-        for(let i=0;i<windowObservers.count;++i) {
-            const window=windowObservers.objectAt(i)
-            if(window && window.activeWindow && ((settings.pauseFullscreen && window.fullscreen) || (settings.pauseMaximized && window.maximized))) {paused=true;break}
-        }
-        automaticPause=paused
-    }
-    Instantiator {
-        id: windowObservers
-        model: TaskManager.TasksModel { groupMode: TaskManager.TasksModel.GroupDisabled }
-        delegate: QtObject {
-            property bool activeWindow: model.IsActive === true
-            property bool fullscreen: model.IsFullScreen === true
-            property bool maximized: model.IsMaximized === true
-            onActiveWindowChanged: Qt.callLater(root.updateWindowPolicy)
-            onFullscreenChanged: Qt.callLater(root.updateWindowPolicy)
-            onMaximizedChanged: Qt.callLater(root.updateWindowPolicy)
-        }
-        onObjectAdded: Qt.callLater(root.updateWindowPolicy)
-        onObjectRemoved: Qt.callLater(root.updateWindowPolicy)
+        automaticPause=false
     }
     onAutomaticPauseChanged: livePropertyTimer.restart()
 
@@ -1209,6 +1198,15 @@ ApplicationWindow {
                         Layout.preferredWidth: 136
                         Layout.preferredHeight: 40
                         onClicked: genericFiles.open()
+                        background: Rectangle { radius: 10; color: "#242130"; border.color: "#383341" }
+                        contentItem: Text { text: parent.text; color: "#F4F2FA"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    }
+
+                    Button_redesign {
+                        text: "Reload"
+                        Layout.preferredWidth: 104
+                        Layout.preferredHeight: 40
+                        onClicked: root.reloadLibrary()
                         background: Rectangle { radius: 10; color: "#242130"; border.color: "#383341" }
                         contentItem: Text { text: parent.text; color: "#F4F2FA"; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
@@ -1783,7 +1781,7 @@ ApplicationWindow {
                     Text {text:root.assets.length+" items · "+root.assets.filter(asset=>asset.kind==="wallpaper").length+" wallpapers · "+root.assets.filter(asset=>asset.kind==="character").length+" characters";color:root.textMuted;font.pixelSize:13}
                     Text {Layout.fillWidth:true;text:"Your installed collection is available in this preview. Original media and installed settings are preserved; preview changes are stored separately.";color:root.textDisabled;font.pixelSize:12;wrapMode:Text.WordWrap}
                     Text {Layout.fillWidth:true;text:sceneStore.libraryDirectory();color:root.textMuted;font.pixelSize:12;wrapMode:Text.WrapAnywhere}
-                    Button_redesign {text:"Open preview library folder";onClicked:sceneStore.openFolder("file://"+sceneStore.libraryDirectory())}
+                    Button_redesign {text:"Open WaniEngine videos folder";onClicked:sceneStore.openFolder("file://"+sceneStore.libraryDirectory())}
                     Item {Layout.fillHeight:true}
                 }
                 ColumnLayout {

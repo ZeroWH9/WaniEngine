@@ -1,5 +1,5 @@
 #pragma once
-#include <QChronoTimer>
+#include <QTimer>
 #include <QElapsedTimer>
 #include <QMovie>
 #include <QQuickItem>
@@ -19,7 +19,7 @@ public:
     bool running() const {return m_timer.isActive();} void setRunning(bool value);
     double seconds() const {return m_elapsed.nsecsElapsed()/1e9;}
 signals: void fpsChanged(); void runningChanged(); void tick();
-private: int m_fps=60; QChronoTimer m_timer; QElapsedTimer m_elapsed;
+private: int m_fps=60; QTimer m_timer; QElapsedTimer m_elapsed;
 };
 class VideoFrameLimiter : public QObject {
     Q_OBJECT

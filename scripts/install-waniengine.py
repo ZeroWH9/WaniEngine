@@ -128,12 +128,16 @@ def install(bundle, paths=None, integration=True):
     # Validate the current library before modifying any installed files.
     scene = prepare_scene(paths)
     if integration:
-        for tool in ('ffmpeg', 'ffprobe', 'plasmashell'):
+        is_kde = 'kde' in os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        required = ['ffmpeg', 'ffprobe']
+        if is_kde:
+            required.append('plasmashell')
+        for tool in required:
             if not shutil.which(tool):
                 raise RuntimeError('Missing runtime dependency: ' + tool)
         checked = subprocess.run(['ldd', str(bundle / 'bin/waniengine')], capture_output=True, text=True)
         if checked.returncode or 'not found' in checked.stdout:
-            raise RuntimeError('Missing native Qt/KDE runtime library:\n' + checked.stdout)
+            raise RuntimeError('Missing native Qt runtime library:\n' + checked.stdout)
         stop_managers()
     prefix = paths['prefix']
     prefix.mkdir(parents=True, exist_ok=True)
@@ -187,7 +191,7 @@ def install(bundle, paths=None, integration=True):
                     'exec ' + shlex.quote(str(current / 'bin/waniengine')) + ' "$@"\n')
         write_atomic(paths['launcher'], launcher, 0o755)
         icon = current / 'share/waniengine/waniengine.png'
-        write_atomic(app, desktop_entry(version / 'bin/waniengine', icon))
+        write_atomic(app, desktop_entry(paths['launcher'], icon))
         write_atomic(startup, desktop_entry(paths['launcher'], icon, True))
         write_atomic(shortcut, desktop_entry(paths['launcher'], icon), 0o755)
         write_atomic(state_file, scene)

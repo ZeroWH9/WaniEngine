@@ -272,23 +272,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "waniengine-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "waniengine-daemon"
-version = "0.1.0"
-dependencies = [
- "waniengine-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -550,8 +533,25 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
- "waniengine-core",
  "serde_json",
+ "waniengine-core",
+]
+
+[[package]]
+name = "waniengine-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "waniengine-daemon"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "waniengine-core",
 ]
 
 [[package]]
