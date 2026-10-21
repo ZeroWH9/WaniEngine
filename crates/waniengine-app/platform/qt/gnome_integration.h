@@ -56,4 +56,6 @@ private:
     QString m_sessionPath;
     QString m_originalPictureUri;
     QString m_originalPictureUriDark;
+    QString m_appliedPictureUri;
+    QString m_appliedPictureUriDark;
 };

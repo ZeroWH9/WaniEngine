@@ -72,5 +72,12 @@ QJsonObject validateWallpaperPackage(const QString &source)
 #endif
     if (!object) return failure(renderer.errorString());
     if (!warnings.isEmpty()) return failure(warnings.join('\n'));
-    return {{u"ok"_s,true},{u"schemaKeys"_s,expectedKeys.size()},{u"qml"_s,u"compiled"_s},{u"config"_s,u"validated"_s}};
+#ifdef WANIENGINE_HAS_KF6
+    return {{u"ok"_s,true},{u"schemaKeys"_s,expectedKeys.size()},{u"qml"_s,u"compiled"_s},{u"config"_s,u"validated by KConfigLoader"_s}};
+#else
+    // Without KF6 we can still compile the QML and check the XML schema, but
+    // the KConfig-backed value/type validation is unavailable. Report that
+    // honestly instead of claiming the configuration was validated.
+    return {{u"ok"_s,true},{u"schemaKeys"_s,expectedKeys.size()},{u"qml"_s,u"compiled"_s},{u"config"_s,u"schema and QML only (KConfig unavailable)"_s}};
+#endif
 }

@@ -36,6 +36,8 @@ ApplicationWindow {
     readonly property color pink: "#FB7185"
 
     property var assets: []
+    // Files found in the Videos folder. Read-only extras, never saved as assets.
+    property var libraryExtras: []
     property var playlist: []
     property string playlistName: "Unsaved"
     property bool playlistDirty: false
@@ -96,7 +98,8 @@ ApplicationWindow {
     }
     readonly property var visibleAssets: {
         const needle = searchText.trim().toLowerCase()
-        let rows = assets.filter((item) => {
+        // Discovered files come from the Videos folder and are read-only extras.
+        let rows = assets.concat(libraryExtras || []).filter((item) => {
             const matchesText = needle.length === 0 || item.name.toLowerCase().includes(needle)
             const matchesKind = contentFilter === "all" || item.kind === contentFilter
             const matchesFavorite = !favoritesOnly || item.favorite
@@ -316,6 +319,10 @@ ApplicationWindow {
     }
 
     function removeAsset(url) {
+        if ((libraryExtras || []).some((item) => item.url === url)) {
+            showStatus("This file lives in your Videos folder. Move it out of Videos/WaniEngine to remove it.")
+            return
+        }
         if(actorUrls.indexOf(url)>=0) {
             const next=actorUrls.filter((entry)=>entry!==url)
             if(!overlayController.applyActors(actorsConfiguration(next),selectedMonitor)) {showStatus(overlayController.lastError);return}
@@ -583,6 +590,7 @@ ApplicationWindow {
                     fit: "cover"
                 }, item, !item.width && !item.missing && typeof sceneStore.describeMedia === "function" ? JSON.parse(sceneStore.describeMedia(item.url)) : {})
             })
+            libraryExtras = (state.discovered || []).map((item) => Object.assign({extension: fileExtension(item.url || "").toUpperCase()}, item))
             playlist = (state.playlist || []).filter(url => assets.some(item => item.url===url && item.kind==="wallpaper"))
             playlistName = state.playlistName || "Unsaved"
             playlistDirty = !!state.playlistDirty
@@ -697,8 +705,46 @@ ApplicationWindow {
             return !!url && monitorNames.indexOf(monitor)>=0 && restoredWallpapers[monitor]!==url && restoreGiveUp[monitor]!==url
         })
     }
+    property bool pausePolicyAvailable: false
+    property var windowObservers: null
     function updateWindowPolicy() {
-        automaticPause=false
+        let paused=false
+        const observers = windowObservers
+        if(observers && settings) {
+            for(let i=0;i<observers.count;++i) {
+                const win=observers.objectAt(i)
+                if(win && win.activeWindow && ((settings.pauseFullscreen && win.fullscreen) || (settings.pauseMaximized && win.maximized))) {paused=true;break}
+            }
+        }
+        automaticPause=paused
+    }
+    // Plasma's TaskManager drives the pause policy. It is absent on GNOME, so
+    // instantiate the observer only when the QML module is actually importable.
+    function createWindowObservers() {
+        if (typeof Qt.createQmlObject !== "function") return
+        try {
+            windowObservers = Qt.createQmlObject(`
+                import QtQml
+                import org.kde.taskmanager as TaskManager
+                Instantiator {
+                    model: TaskManager.TasksModel { groupMode: TaskManager.TasksModel.GroupDisabled }
+                    delegate: QtObject {
+                        property bool activeWindow: model.IsActive === true
+                        property bool fullscreen: model.IsFullScreen === true
+                        property bool maximized: model.IsMaximized === true
+                        onActiveWindowChanged: Qt.callLater(root.updateWindowPolicy)
+                        onFullscreenChanged: Qt.callLater(root.updateWindowPolicy)
+                        onMaximizedChanged: Qt.callLater(root.updateWindowPolicy)
+                    }
+                    onObjectAdded: Qt.callLater(root.updateWindowPolicy)
+                    onObjectRemoved: Qt.callLater(root.updateWindowPolicy)
+                }`, root, "windowObservers")
+            pausePolicyAvailable = windowObservers !== null
+        } catch (error) {
+            windowObservers = null
+            pausePolicyAvailable = false
+        }
+        Qt.callLater(root.updateWindowPolicy)
     }
     onAutomaticPauseChanged: livePropertyTimer.restart()
 
@@ -725,6 +771,7 @@ ApplicationWindow {
 
     Component.onCompleted: {
         restoreState()
+        createWindowObservers()
         if (!applicationController.setStartWithSession(!!settings.startWithSession))
             showStatus("Could not update the autostart entry.")
         reconcileSelectedMonitor()

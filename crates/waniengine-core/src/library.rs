@@ -371,15 +371,20 @@ impl LibraryStore {
             .iter()
             .filter_map(|asset| asset["url"].as_str().map(str::to_owned))
             .collect();
-        for asset in discover_media(&user_videos_directory()) {
-            if asset["url"]
-                .as_str()
-                .is_some_and(|url| !known_urls.contains(url))
-            {
-                assets.push(asset);
-            }
-        }
+        // Files dropped into the Videos folder are discovered fresh on every
+        // load and reported separately. They must never be merged into
+        // `assets`, because the UI saves that list back to scene.json and the
+        // discovered files would become stale ghost entries.
+        let discovered: Vec<Value> = discover_media(&user_videos_directory())
+            .into_iter()
+            .filter(|asset| {
+                asset["url"]
+                    .as_str()
+                    .is_some_and(|url| !known_urls.contains(url))
+            })
+            .collect();
         state["assets"] = json!(assets);
+        state["discovered"] = json!(discovered);
         state["schema"] = json!(2);
         // The preview must not install an autostart entry merely because the old app did.
         if !self.root.join("scene.json").is_file() {
@@ -423,23 +428,96 @@ impl LibraryStore {
         if asset["configUrl"].is_string() {
             return Ok(asset);
         }
+        let raw_name = asset["name"].as_str().unwrap_or("Content");
+        let name: String = raw_name
+            .chars()
+            .take(100)
+            .map(|c| {
+                if c.is_control() || "\\/:*?\"<>|".contains(c) {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let name = if name.trim().is_empty() || [".", ".."].contains(&name.as_str()) {
+            "Content"
+        } else {
+            name.trim()
+        };
+        let library = self.root.join("contents");
+        fs::create_dir_all(&library)?;
+        let mut folder = library.join(name);
+        let mut number = 2;
+        while folder.exists() {
+            folder = library.join(format!("{name} ({number})"));
+            number += 1;
+        }
+        fs::create_dir(&folder)?;
+        let destination = folder.join(source.file_name().ok_or("Invalid source filename")?);
+        if let Err(error) = fs::copy(&source, &destination) {
+            let _ = fs::remove_dir(&folder);
+            return Err(error.into());
+        }
         asset["id"] = json!(format!(
             "rust-{}-{}",
             std::process::id(),
             NEXT_FILE.fetch_add(1, Ordering::Relaxed)
         ));
         asset["originalSource"] = asset["url"].clone();
+        asset["url"] = json!(file_url(&destination));
+        asset["folderUrl"] = json!(file_url(&folder));
+        asset["configUrl"] = json!(file_url(&folder.join("content.json")));
+        if let Some(thumbnail) = asset["thumbnailUrl"]
+            .as_str()
+            .and_then(|s| file_path(s).ok())
+        {
+            let target = folder.join("preview.png");
+            if fs::copy(thumbnail, &target).is_ok() {
+                asset["thumbnailUrl"] = json!(file_url(&target));
+            }
+        }
         if !asset["audio"].is_object() {
             asset["audio"] = json!({"enabled":false,"files":[]});
         }
+        write_json(
+            &folder.join("content.json"),
+            &content_configuration(&asset, &folder)?,
+        )?;
         Ok(asset)
     }
 
-    pub fn add_audio(&self, _asset: &Value, sources: &[Value]) -> Result<Value> {
-        let mut tracks = _asset["audio"]["files"]
+    pub fn add_audio(&self, asset: &Value, sources: &[Value]) -> Result<Value> {
+        let mut tracks = asset["audio"]["files"]
             .as_array()
             .cloned()
             .unwrap_or_default();
+        let identity = asset["id"]
+            .as_str()
+            .unwrap_or("character")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let content_folder = asset["folderUrl"]
+            .as_str()
+            .and_then(|url| file_path(url).ok());
+        let folder = match content_folder {
+            Some(folder)
+                if folder
+                    .canonicalize()?
+                    .starts_with(self.root.canonicalize()?) =>
+            {
+                folder.join("audio")
+            }
+            _ => self.root.join("audio").join(identity),
+        };
+        fs::create_dir_all(&folder)?;
         for source in sources {
             let source = file_path(source.as_str().ok_or("Invalid audio URL")?)?;
             let extension = source
@@ -450,8 +528,17 @@ impl LibraryStore {
             if !["wav", "mp3", "ogg", "flac", "m4a", "aac", "opus"].contains(&extension.as_str()) {
                 return Err("Unsupported audio format".into());
             }
-            let name = source.file_name().ok_or("Invalid audio filename")?;
-            tracks.push(json!({"name":name.to_string_lossy(),"url":file_url(&source),"file":file_url(&source),"playback":{"enabled":true,"mode":"once","volume":100,"intervalSeconds":30,"radiusPixels":40,"cooldownSeconds":2}}));
+            let mut target = folder.join(source.file_name().ok_or("Invalid audio filename")?);
+            let mut index = 2;
+            while target.exists() {
+                target = folder.join(format!(
+                    "{}-{index}.{extension}",
+                    source.file_stem().unwrap().to_string_lossy()
+                ));
+                index += 1;
+            }
+            fs::copy(&source, &target)?;
+            tracks.push(json!({"name":target.file_name().unwrap().to_string_lossy(),"url":file_url(&target),"file":target.strip_prefix(&self.root)?.to_string_lossy(),"playback":{"enabled":true,"mode":"once","volume":100,"intervalSeconds":30,"radiusPixels":40,"cooldownSeconds":2}}));
         }
         Ok(json!(tracks))
     }
@@ -548,7 +635,69 @@ mod tests {
         assert_eq!(s["assets"][0]["missing"], true);
     }
     #[test]
-    fn import_and_audio_references_keep_originals() {
+    fn discovered_media_never_enters_the_saved_asset_list() {
+        let t = Temp::new();
+        write_json(
+            &t.0.join("installed"),
+            &json!({"assets":[{"name":"Saved","url":file_url(&t.0.join("saved.png"))}]}),
+        )
+        .unwrap();
+        fs::write(t.0.join("saved.png"), b"png").unwrap();
+        let store = LibraryStore::new(t.0.join("own"), t.0.join("installed"));
+        let state = store.load_scene().unwrap();
+        // The persisted list keeps only owned entries; discovery is reported
+        // separately so it can never be written back to scene.json.
+        assert_eq!(state["assets"].as_array().unwrap().len(), 1);
+        assert_eq!(state["assets"][0]["name"], "Saved");
+        assert!(state["discovered"].is_array());
+        store.save_scene(state.clone()).unwrap();
+        let reloaded = store.load_scene().unwrap();
+        assert_eq!(reloaded["assets"].as_array().unwrap().len(), 1);
+    }
+    #[test]
+    fn organize_sanitizes_hostile_names_and_never_escapes_the_root() {
+        let t = Temp::new();
+        fs::write(t.0.join("a.gif"), b"gif").unwrap();
+        let store = LibraryStore::new(t.0.join("preview"), t.0.join("none"));
+        for name in ["..", ".", "../escape", "a/b\\c:d", "   "] {
+            let asset = store
+                .organize(json!({"url":file_url(&t.0.join("a.gif")),"name":name,"kind":"wallpaper"}))
+                .unwrap();
+            let folder = file_path(asset["folderUrl"].as_str().unwrap()).unwrap();
+            assert!(
+                folder.starts_with(store.root.join("contents")),
+                "{name} escaped the library: {folder:?}"
+            );
+            assert!(folder.is_dir());
+        }
+    }
+
+    #[test]
+    fn discover_media_keeps_supported_files_and_ignores_the_rest() {
+        let t = Temp::new();
+        fs::write(t.0.join("still.PNG"), b"png").unwrap();
+        fs::write(t.0.join("loop.GIF"), b"gif").unwrap();
+        fs::write(t.0.join("clip.MP4"), b"mp4").unwrap();
+        fs::write(t.0.join("notes.txt"), b"txt").unwrap();
+        let assets = discover_media(&t.0);
+        assert_eq!(assets.len(), 3);
+        assert!(assets.iter().all(|asset| asset["video"].is_boolean()));
+        let loop_asset = assets
+            .iter()
+            .find(|asset| asset["name"] == "loop")
+            .expect("gif discovered");
+        assert_eq!(loop_asset["kind"], "character");
+        assert_eq!(loop_asset["video"], false);
+        let clip = assets
+            .iter()
+            .find(|asset| asset["name"] == "clip")
+            .expect("video discovered");
+        assert_eq!(clip["video"], true);
+        assert_eq!(clip["kind"], "wallpaper");
+    }
+
+    #[test]
+    fn import_and_audio_copy_keep_originals() {
         let t = Temp::new();
         fs::write(t.0.join("a.gif"), b"gif").unwrap();
         fs::write(t.0.join("a.wav"), b"wav").unwrap();
@@ -556,9 +705,10 @@ mod tests {
         let asset = store
             .organize(json!({"url":file_url(&t.0.join("a.gif")),"name":"A","kind":"character"}))
             .unwrap();
-        assert_eq!(
-            file_path(asset["url"].as_str().unwrap()).unwrap(),
-            t.0.join("a.gif")
+        assert!(
+            file_path(asset["url"].as_str().unwrap())
+                .unwrap()
+                .starts_with(&store.root)
         );
         let tracks = store
             .add_audio(&asset, &[json!(file_url(&t.0.join("a.wav")))])
@@ -567,14 +717,17 @@ mod tests {
         assert!(t.0.join("a.gif").is_file());
         assert!(t.0.join("a.wav").is_file());
         let mut saved_asset = asset.clone();
-        saved_asset["audio"]["files"] = tracks.clone();
+        saved_asset["audio"]["files"] = tracks;
         saved_asset["scale"] = json!(75);
         store.save_scene(json!({"assets":[saved_asset]})).unwrap();
-        assert_eq!(asset["url"], file_url(&t.0.join("a.gif")));
-        assert_eq!(saved_asset["scale"], 75);
-        assert!(file_path(tracks[0]["url"].as_str().unwrap())
-            .unwrap()
-            .is_file());
+        let resolved = resolve_asset(&json!({"configUrl":asset["configUrl"]})).unwrap();
+        assert_eq!(resolved["scale"], 75);
+        assert_eq!(read_json(&file_path(asset["configUrl"].as_str().unwrap()).unwrap()).unwrap()["format"], "waniengine-content");
+        assert!(
+            file_path(resolved["audio"]["files"][0]["url"].as_str().unwrap())
+                .unwrap()
+                .is_file()
+        );
     }
     #[test]
     fn playlist_round_trip_and_validation() {

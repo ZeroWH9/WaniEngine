@@ -93,24 +93,29 @@ fn main() {
     let wallpaper_definition = format!("\"{}\"", runtime.join("wallpaper").display());
     let version_definition = format!("\"{}\"", env!("CARGO_PKG_VERSION"));
 
-    let has_layer_shell = PathBuf::from("/usr/include/LayerShellQt").is_dir();
-    let has_kf6 = PathBuf::from("/usr/include/KF6/KConfig").is_dir();
+    let layer_shell = pkg_config(&["layershellqtinterface", "LayerShellQtInterface"]);
+    let kf6_config = pkg_config(&["KF6ConfigGui", "KF6ConfigCore", "KF6ConfigQml"]);
+    let x11 = pkg_config(&["x11"]);
 
     unsafe {
         builder
             .cc_builder(|cc| {
                 cc.include(&manifest)
                     .include(manifest.join("platform/qt"));
-                if has_layer_shell {
-                    cc.include("/usr/include/LayerShellQt")
-                        .define("WANIENGINE_HAS_LAYER_SHELL_QT", "1");
+                if let Some(flags) = &layer_shell {
+                    for path in &flags.includes {
+                        cc.include(path);
+                    }
+                    cc.define("WANIENGINE_HAS_LAYER_SHELL_QT", "1");
                 }
-                if has_kf6 {
-                    cc.include("/usr/include/KF6/KConfigGui")
-                        .include("/usr/include/KF6/KConfigCore")
-                        .include("/usr/include/KF6/KConfigQml")
-                        .include("/usr/include/KF6/KConfig")
-                        .define("WANIENGINE_HAS_KF6", "1");
+                if let Some(flags) = &kf6_config {
+                    for path in &flags.includes {
+                        cc.include(path);
+                    }
+                    cc.define("WANIENGINE_HAS_KF6", "1");
+                }
+                if x11.is_some() {
+                    cc.define("WANIENGINE_HAS_X11", "1");
                 }
                 cc.flag_if_supported("-std=c++20");
                 cc.define("WANIENGINE_RUNTIME_ROOT", runtime_definition.as_str())
@@ -122,19 +127,60 @@ fn main() {
             })
             .build();
     }
-    if has_layer_shell {
-        println!("cargo:rustc-link-lib=LayerShellQtInterface");
-    }
-    if has_kf6 {
-        for library in [
-            "KF6ConfigGui",
-            "KF6ConfigQml",
-            "KF6ConfigCore",
-        ] {
-            println!("cargo:rustc-link-lib={library}");
+    for flags in [&layer_shell, &kf6_config, &x11] {
+        if let Some(flags) = flags {
+            for directory in &flags.lib_dirs {
+                println!("cargo:rustc-link-search=native={}", directory.display());
+            }
+            for library in &flags.libs {
+                println!("cargo:rustc-link-lib={library}");
+            }
         }
     }
-    println!("cargo:rustc-link-lib=X11");
+    for key in ["PATH", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR"] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
     println!("cargo:rerun-if-changed=platform");
     println!("cargo:rerun-if-changed=qml");
+}
+
+struct PkgConfigFlags {
+    includes: Vec<PathBuf>,
+    lib_dirs: Vec<PathBuf>,
+    libs: Vec<String>,
+}
+
+/// Ask pkg-config for a module's compile and link flags. Returns `None` when
+/// pkg-config is unavailable or the module is not installed, so optional
+/// dependencies degrade instead of breaking the build.
+fn pkg_config(candidates: &[&str]) -> Option<PkgConfigFlags> {
+    let name = candidates
+        .iter()
+        .find(|name| Command::new("pkg-config").args(["--exists", name]).status().map(|s| s.success()).unwrap_or(false))?;
+    let output = Command::new("pkg-config")
+        .args(["--cflags", "--libs", "--libs-only-l", "--libs-only-L", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut flags = PkgConfigFlags {
+        includes: Vec::new(),
+        lib_dirs: Vec::new(),
+        libs: Vec::new(),
+    };
+    for token in text.split_whitespace() {
+        let token = token.trim();
+        if let Some(path) = token.strip_prefix("-I") {
+            flags.includes.push(PathBuf::from(path));
+        } else if let Some(path) = token.strip_prefix("-L") {
+            flags.lib_dirs.push(PathBuf::from(path));
+        } else if let Some(library) = token.strip_prefix("-l") {
+            if !flags.libs.iter().any(|existing| existing == library) {
+                flags.libs.push(library.to_owned());
+            }
+        }
+    }
+    Some(flags)
 }

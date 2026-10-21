@@ -22,7 +22,7 @@ If WaniEngine is useful to you, consider starring the repository.
 
 ## Run WaniEngine
 
-WaniEngine supports Linux on both **KDE Plasma 6 (Wayland)** and **GNOME (Wayland / X11)**. It needs the host system's Qt 6 libraries, Qt Quick Controls and Layouts QML modules, FFmpeg, and `ffprobe` (and optionally LayerShellQt on KDE Wayland). Python 3 is required to run the installer. The installer checks required tools and native library links before installing.
+WaniEngine supports **KDE Plasma 6 (Wayland)** and **GNOME** sessions. On GNOME the wallpaper is drawn through XWayland, so a GNOME session needs XWayland enabled. It needs the host system's Qt 6 libraries, Qt Quick Controls and Layouts QML modules, FFmpeg, and `ffprobe`. LayerShellQt and KDE Frameworks 6 KConfig are optional: when they are missing, KDE layer-shell overlays and KConfig-backed package validation are disabled instead of failing the build. Python 3 is required to run the installer. The installer checks required tools and native library links before installing.
 
 WaniEngine uses the Qt libraries provided by your system; it is not a self-contained AppImage. Hardware, graphics drivers, and available video codecs can affect playback.
 
@@ -37,7 +37,7 @@ To compile WaniEngine from source, install:
 - Rust/Cargo 1.88 or newer
 - C++20 compiler and CMake 3.26 or newer
 - Qt 6.8+ development packages: Core/Gui, QML/Quick, Quick Controls, Multimedia, DBus, Widgets, Network, OpenGL, Concurrent
-- LayerShellQt and KDE Frameworks 6 KConfig development files
+- Optional: LayerShellQt and KDE Frameworks 6 KConfig development files (auto-detected with `pkg-config`)
 
 Packaging the installer also requires Python 3 and `strip` from GNU binutils.
 

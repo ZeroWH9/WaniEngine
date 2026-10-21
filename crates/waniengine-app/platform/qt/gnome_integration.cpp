@@ -24,8 +24,10 @@
 #include <QWindow>
 #include <algorithm>
 #include <fcntl.h>
+#ifdef WANIENGINE_HAS_X11
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#endif
 #include <unistd.h>
 
 using namespace Qt::StringLiterals;
@@ -55,6 +57,7 @@ void setGSettings(const QString &schema, const QString &key, const QString &valu
     process.waitForFinished(2000);
 }
 
+#ifdef WANIENGINE_HAS_X11
 void configureX11Wallpaper(QWindow *window)
 {
     auto *display = XOpenDisplay(nullptr);
@@ -85,6 +88,7 @@ void configureX11Wallpaper(QWindow *window)
     XFlush(display);
     XCloseDisplay(display);
 }
+#endif
 }
 
 GnomeIntegration::GnomeIntegration(QObject *parent)
@@ -148,24 +152,32 @@ void GnomeIntegration::setError(const QString &message)
 
 void GnomeIntegration::backupStaticWallpaper()
 {
-    if (m_originalPictureUri.isEmpty()) {
-        m_originalPictureUri = queryGSettings(u"org.gnome.desktop.background"_s, u"picture-uri"_s);
-    }
-    if (m_originalPictureUriDark.isEmpty()) {
-        m_originalPictureUriDark = queryGSettings(u"org.gnome.desktop.background"_s, u"picture-uri-dark"_s);
-    }
+    if (!m_originalPictureUri.isEmpty()) return;
+    m_originalPictureUri = queryGSettings(u"org.gnome.desktop.background"_s, u"picture-uri"_s);
+    m_originalPictureUriDark = queryGSettings(u"org.gnome.desktop.background"_s, u"picture-uri-dark"_s);
+    if (m_originalPictureUri.isEmpty()) return;
+    // Remember what we wrote over so restore() only rewinds our own change.
+    m_appliedPictureUri = m_originalPictureUri;
+    m_appliedPictureUriDark = m_originalPictureUriDark;
 }
 
 void GnomeIntegration::restoreStaticWallpaper()
 {
-    if (!m_originalPictureUri.isEmpty()) {
+    const QString current = queryGSettings(u"org.gnome.desktop.background"_s, u"picture-uri"_s);
+    const QString currentDark = queryGSettings(u"org.gnome.desktop.background"_s, u"picture-uri-dark"_s);
+    const bool pictureUntouched = current == m_appliedPictureUri || current.isEmpty();
+    const bool darkUntouched = currentDark == m_appliedPictureUriDark || currentDark.isEmpty();
+
+    if (!m_originalPictureUri.isEmpty() && pictureUntouched) {
         setGSettings(u"org.gnome.desktop.background"_s, u"picture-uri"_s, m_originalPictureUri);
-        m_originalPictureUri.clear();
     }
-    if (!m_originalPictureUriDark.isEmpty()) {
+    if (!m_originalPictureUriDark.isEmpty() && darkUntouched) {
         setGSettings(u"org.gnome.desktop.background"_s, u"picture-uri-dark"_s, m_originalPictureUriDark);
-        m_originalPictureUriDark.clear();
     }
+    m_originalPictureUri.clear();
+    m_originalPictureUriDark.clear();
+    m_appliedPictureUri.clear();
+    m_appliedPictureUriDark.clear();
 }
 
 bool GnomeIntegration::applyContent(const QString &selectedUrl, const QString &selectedKind,
@@ -206,8 +218,14 @@ bool GnomeIntegration::applyContent(const QString &selectedUrl, const QString &s
         workerState.process = new QProcess(this);
 
         auto environment = QProcessEnvironment::systemEnvironment();
-        // Force xcb (XWayland) for desktop window layering via _NET_WM_WINDOW_TYPE_DESKTOP
-        environment.insert(u"QT_QPA_PLATFORM"_s, u"xcb"_s);
+        // Prefer XWayland so the window can be layered with
+        // _NET_WM_WINDOW_TYPE_DESKTOP. A pure Wayland session keeps its own
+        // platform; Mutter then treats the window as a normal bottom layer.
+        if (!environment.value(u"DISPLAY"_s).isEmpty()) {
+            environment.insert(u"QT_QPA_PLATFORM"_s, u"xcb"_s);
+        } else {
+            environment.remove(u"QT_QPA_PLATFORM"_s);
+        }
         workerState.process->setProcessEnvironment(environment);
 
         workerState.process->start(QCoreApplication::applicationFilePath(),
@@ -373,8 +391,10 @@ bool GnomeIntegration::loadRecovery()
 
 int GnomeIntegration::runWallpaperWorker(int argc, char **argv)
 {
-    // Force XCB for XWayland desktop window positioning
-    qputenv("QT_QPA_PLATFORM", "xcb");
+    // Prefer XCB through XWayland; fall back to the session's own platform.
+    if (!qEnvironmentVariableIsEmpty("DISPLAY")) {
+        qputenv("QT_QPA_PLATFORM", "xcb");
+    }
 
     QGuiApplication app(argc, argv);
     app.setApplicationName(u"waniengine-wallpaper"_s);
@@ -412,7 +432,9 @@ int GnomeIntegration::runWallpaperWorker(int argc, char **argv)
     }
 
     view.show();
-    configureX11Wallpaper(&view);
+#ifdef WANIENGINE_HAS_X11
+    if (app.platformName() == u"xcb"_s) configureX11Wallpaper(&view);
+#endif
 
     // Listen on stdin for JSON updates
     fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
