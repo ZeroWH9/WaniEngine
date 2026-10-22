@@ -29,20 +29,39 @@ def write_atomic(path, data, mode=0o644):
         Path(name).unlink(missing_ok=True)
 
 
+def xdg_user_dir(kind, fallback):
+    """Resolve a localized XDG folder (Documents, Dokumente, Documentos...)."""
+    if shutil.which('xdg-user-dir'):
+        result = subprocess.run(['xdg-user-dir', kind], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip())
+    config = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+    dirs = config / 'user-dirs.dirs'
+    if dirs.is_file():
+        key = 'XDG_' + kind + '_DIR='
+        for line in dirs.read_text(errors='replace').splitlines():
+            line = line.strip()
+            if line.startswith(key):
+                value = line[len(key):].strip().strip('"').replace('$HOME', str(Path.home()))
+                if os.path.isabs(value):
+                    return Path(value)
+    return fallback
+
+
 def locations():
     home = Path.home()
     state = Path(os.environ.get('XDG_STATE_HOME', home / '.local/state'))
     data = Path(os.environ.get('XDG_DATA_HOME', home / '.local/share'))
     config = Path(os.environ.get('XDG_CONFIG_HOME', home / '.config'))
-    desktop = home / 'Desktop'
-    if shutil.which('xdg-user-dir'):
-        result = subprocess.run(['xdg-user-dir', 'DESKTOP'], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            desktop = Path(result.stdout.strip())
+    desktop = xdg_user_dir('DESKTOP', home / 'Desktop')
+    # The library lives in the user's Documents folder, matching the app's own
+    # resolution. Keeping it in the state directory made every update point at
+    # a location the app no longer used.
+    documents = xdg_user_dir('DOCUMENTS', home / 'Documents')
     return {'home': home, 'prefix': home / '.local/opt/waniengine',
             'launcher': home / '.local/bin/waniengine', 'data': data,
             'config': config, 'desktop': desktop,
-            'library': state / 'WaniEngine/waniengine/library',
+            'library': documents / 'WaniEngine',
             'state': state, 'backup': state / 'WaniEngine/installer-backups'}
 
 
@@ -105,7 +124,20 @@ def desktop_entry(executable, icon, background=False):
 
 
 def prepare_scene(paths):
-    scene_path = paths['library'] / 'scene.json'
+    library = paths['library']
+    legacy = paths['state'] / 'WaniEngine/waniengine/library'
+    scene_path = library / 'scene.json'
+    # Absorb an older state-directory library so an update never looks empty.
+    if not scene_path.is_file() and legacy != library and (legacy / 'scene.json').is_file():
+        library.mkdir(parents=True, exist_ok=True)
+        for entry in legacy.iterdir():
+            target = library / entry.name
+            if target.exists():
+                continue
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            else:
+                shutil.copy2(entry, target)
     scene = json.loads(scene_path.read_text()) if scene_path.is_file() else {
         'schema': 2, 'assets': [], 'actorUrls': [], 'playlist': []
     }
