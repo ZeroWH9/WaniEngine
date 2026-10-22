@@ -17,37 +17,19 @@ void FrameClock::setRunning(bool value){if(value==running())return;if(value)m_ti
 VideoFrameLimiter::VideoFrameLimiter(QObject *parent):QObject(parent){
     connect(&m_input,&QVideoSink::videoFrameChanged,this,[this](const QVideoFrame&frame){
         if(!frame.isValid()){m_latest={};m_pending=false;m_clock.setRunning(false);if(m_target)m_target->setVideoFrame({});return;}
-        m_latest=frame;m_pending=true;m_clock.setRunning(m_target!=nullptr);
+        // Never queue frames while the target has no live RHI: they would be
+        // handed to a sink whose graphics resources are already gone, which
+        // crashes inside the FFmpeg decode thread.
+        if(!m_target||!m_target->rhi()){m_latest={};m_pending=false;m_clock.setRunning(false);return;}
+        m_latest=frame;m_pending=true;m_clock.setRunning(true);
     });
     connect(&m_clock,&FrameClock::tick,this,[this]{
-        if(m_target&&m_input.rhi()!=m_target->rhi())m_input.setRhi(m_target->rhi());
-        if(m_pending&&m_target){m_target->setVideoFrame(fit(m_latest));m_pending=false;emit framePresented();}
+        if(!m_target){m_clock.setRunning(false);return;}
+        auto *rhi=m_target->rhi();
+        if(!rhi){m_latest={};m_pending=false;m_clock.setRunning(false);return;}
+        if(m_input.rhi()!=rhi)m_input.setRhi(rhi);
+        if(m_pending){m_target->setVideoFrame(m_latest);m_pending=false;emit framePresented();}
     });
-}
-void VideoFrameLimiter::setMaximumFrameSize(const QSize &size){
-    if(size==m_maximumSize)return;
-    m_maximumSize=size;
-    // Re-fit the retained frame immediately instead of dropping it, which
-    // would leave a blank frame until the decoder delivers the next one.
-    if(m_latest.isValid())m_latest=fit(m_latest);
-    emit maximumFrameSizeChanged();
-}
-QVideoFrame VideoFrameLimiter::fit(QVideoFrame frame){
-    if(!m_maximumSize.isValid()||!frame.isValid())return frame;
-    const QSize source=frame.size();
-    if(source.isEmpty())return frame;
-    // Only oversized frames are converted. Frames that already fit are passed
-    // through untouched, because converting them to QImage costs a CPU copy.
-    // The 5% tolerance avoids converting near-equal sizes caused by rounding.
-    const QSize limit(m_maximumSize.width()+m_maximumSize.width()/20,
-                      m_maximumSize.height()+m_maximumSize.height()/20);
-    if(source.width()<=limit.width()&&source.height()<=limit.height())return frame;
-    const QSize scaled=source.scaled(limit,Qt::KeepAspectRatio);
-    if(scaled.isEmpty()||scaled==source)return frame;
-    QImage image=frame.toImage();
-    if(image.isNull())return frame;
-    image=image.scaled(scaled,Qt::KeepAspectRatio,Qt::SmoothTransformation);
-    return QVideoFrame(image);
 }
 void VideoFrameLimiter::releaseFrame(){
     m_clock.setRunning(false);m_latest={};m_pending=false;
@@ -56,9 +38,12 @@ void VideoFrameLimiter::releaseFrame(){
 }
 void VideoFrameLimiter::setTarget(QVideoSink*sink){
     if(m_target==sink)return;releaseFrame();if(m_target)disconnect(m_target,nullptr,this,nullptr);
-    m_target=sink;m_input.setRhi(sink?sink->rhi():nullptr);
+    m_target=sink;
+    // Only hand the decoder a real RHI. A null one makes the FFmpeg plugin
+    // register a cleanup callback on nothing and crash on the next frame.
+    m_input.setRhi(sink?sink->rhi():nullptr);
     if(sink)connect(sink,&QObject::destroyed,this,[this]{releaseFrame();m_input.setRhi(nullptr);m_clock.setRunning(false);});
-    m_clock.setRunning(sink!=nullptr&&m_latest.isValid());emit targetChanged();
+    m_clock.setRunning(sink!=nullptr&&sink->rhi()!=nullptr&&m_latest.isValid());emit targetChanged();
 }
 CappedAnimation::CappedAnimation(QQuickItem *parent):QQuickItem(parent){
     setFlag(ItemHasContents);m_movie.setCacheMode(QMovie::CacheNone);
@@ -76,7 +61,14 @@ CappedAnimation::CappedAnimation(QQuickItem *parent):QQuickItem(parent){
     connect(this,&CappedAnimation::fillModeChanged,this,&QQuickItem::update);connect(this,&CappedAnimation::smoothChanged,this,&QQuickItem::update);
     m_clock.setRunning(false);
 }
-void CappedAnimation::presentFrame(){if(!m_dirty)return;m_image=m_pendingImage;m_presentedFrame=m_movie.currentFrameNumber();m_dirty=false;m_textureDirty=true;update();emit framePresented();}
+void CappedAnimation::presentFrame(){
+    if(!m_dirty)return;
+    // Move instead of copying: two full-size QImage buffers double the memory
+    // held for every animation. The texture upload already reads from m_image.
+    m_image=std::move(m_pendingImage);
+    m_pendingImage={};
+    m_presentedFrame=m_movie.currentFrameNumber();m_dirty=false;m_textureDirty=true;update();emit framePresented();
+}
 void CappedAnimation::updateDecodeSize(){
     if(m_size.isEmpty())return;
     QSize wanted=m_size;
@@ -105,7 +97,7 @@ QSGNode* CappedAnimation::updatePaintNode(QSGNode*old,UpdatePaintNodeData*){
     auto *node=static_cast<QSGSimpleTextureNode*>(old);
     if(m_image.isNull()||!window()){delete node;return nullptr;}
     if(!node){node=new OwnedTextureNode;node->setOwnsTexture(false);m_textureDirty=true;}
-    if(m_textureDirty){auto *previous=node->texture();node->setTexture(window()->createTextureFromImage(m_image));delete previous;m_textureDirty=false;}
+    if(m_textureDirty){auto *previous=node->texture();auto *texture=window()->createTextureFromImage(m_image);node->setTexture(texture);if(previous&&previous!=texture)delete previous;m_textureDirty=false;}
     QRectF rect=boundingRect(),source(QPointF(0,0),m_image.size());
     if(m_fillMode==1){auto size=QSizeF(m_image.size());size.scale(rect.size(),Qt::KeepAspectRatio);rect=QRectF((width()-size.width())/2,(height()-size.height())/2,size.width(),size.height());}
     else if(m_fillMode==2){const double scale=std::max(width()/m_image.width(),height()/m_image.height());if(scale>0){QSizeF size(width()/scale,height()/scale);source=QRectF((m_image.width()-size.width())/2,(m_image.height()-size.height())/2,size.width(),size.height());}}

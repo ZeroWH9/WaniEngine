@@ -59,6 +59,7 @@ ApplicationController::ApplicationController(DesktopIntegration *integration, co
                 const QString action = command.value(u"action"_s).toString();
                 if (action == u"open"_s) requestOpen();
                 else if (action == u"exit"_s) requestExit();
+                else if (action == u"close"_s && m_window) m_window->hide();
                 socket->disconnectFromServer();
             };
             connect(socket,&QLocalSocket::readyRead,this,readCommand);
@@ -100,10 +101,6 @@ void ApplicationController::updateTrayAvailability()
 void ApplicationController::requestOpen()
 {
     if (!m_window) return;
-    if (auto *quickWindow = qobject_cast<QQuickWindow *>(m_window)) {
-        quickWindow->setPersistentGraphics(true);
-        quickWindow->setPersistentSceneGraph(true);
-    }
     if (m_window->visibility()==QWindow::Minimized) m_window->showNormal(); else m_window->show();
     m_window->setVisible(true);
     m_window->raise();
@@ -121,6 +118,17 @@ void ApplicationController::closeWindow(bool closeToTray)
 void ApplicationController::requestExit()
 {
     m_tray.hide();
+    if (m_window) {
+        // Stop rendering before the RHI is torn down. Leaving a video pipeline
+        // running while the scene graph and RHI die crashes the app on exit:
+        // the FFmpeg decode thread still delivers frames to a sink whose QRhi
+        // has already gone away.
+        if (auto *quickWindow = qobject_cast<QQuickWindow *>(m_window)) {
+            quickWindow->setPersistentGraphics(false);
+            quickWindow->setPersistentSceneGraph(false);
+        }
+        m_window->setVisible(false);
+    }
     if (!m_integration->restore())
         qWarning().noquote() << "The desktop recovery process will retry:" << m_integration->lastError();
     QCoreApplication::quit();

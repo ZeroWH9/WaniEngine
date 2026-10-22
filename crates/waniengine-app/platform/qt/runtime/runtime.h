@@ -27,21 +27,15 @@ class VideoFrameLimiter : public QObject {
     Q_PROPERTY(QVideoSink* target READ target WRITE setTarget NOTIFY targetChanged)
     Q_PROPERTY(int fps READ fps WRITE setFps NOTIFY fpsChanged)
     Q_PROPERTY(QSize frameSize READ frameSize NOTIFY framePresented)
-    Q_PROPERTY(QSize maximumFrameSize READ maximumFrameSize WRITE setMaximumFrameSize NOTIFY maximumFrameSizeChanged)
 public:
     explicit VideoFrameLimiter(QObject *parent=nullptr);
     Q_INVOKABLE QVideoSink* videoSink(){return &m_input;} QVideoSink* target() const{return m_target;}
     void setTarget(QVideoSink *sink);
     QSize frameSize() const{return m_latest.isValid()?m_latest.size():QSize();}
-    // Downscale oversized frames before they reach the scene graph. A 4K video
-    // on a 1080p screen otherwise uploads four times the needed pixels.
-    QSize maximumFrameSize() const{return m_maximumSize;}
-    void setMaximumFrameSize(const QSize &size);
     Q_INVOKABLE void releaseFrame();
     int fps() const{return m_clock.fps();} void setFps(int fps){m_clock.setFps(fps);emit fpsChanged();}
-signals: void targetChanged(); void fpsChanged(); void framePresented(); void maximumFrameSizeChanged();
-private: QVideoFrame fit(QVideoFrame frame);
-    QVideoSink m_input; QPointer<QVideoSink> m_target; QVideoFrame m_latest; bool m_pending=false; FrameClock m_clock; QSize m_maximumSize;
+signals: void targetChanged(); void fpsChanged(); void framePresented();
+private: QVideoSink m_input; QPointer<QVideoSink> m_target; QVideoFrame m_latest; bool m_pending=false; FrameClock m_clock;
 };
 class CappedAnimation : public QQuickItem {
     Q_OBJECT

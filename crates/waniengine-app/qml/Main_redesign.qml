@@ -80,7 +80,7 @@ ApplicationWindow {
         pauseMaximized: false,
         startWithSession: false,
         restoreOnLaunch: true,
-        closeToTray: false,
+        closeToTray: true,
         animatePreview: true,
         fpsLimit: 60,
         samples: 0,
@@ -800,8 +800,12 @@ ApplicationWindow {
     }
     onClosing: function(close) {
         close.accepted = false
-        if(!settings.closeToTray) shuttingDown=true
-        applicationController.closeWindow(!!settings.closeToTray)
+        // Closing the window keeps the app alive in the tray whenever a tray is
+        // available. Only an explicit Exit from the tray really quits, so the
+        // user never loses the wallpaper by closing the window.
+        const keepRunning = !!settings.closeToTray || applicationController.trayAvailable
+        if(!keepRunning) shuttingDown=true
+        applicationController.closeWindow(keepRunning)
     }
 
     Timer {
@@ -1314,7 +1318,10 @@ ApplicationWindow {
                                     source: modelData.thumbnailUrl || (modelData.video ? "" : modelData.url)
                                     fillMode: modelData.kind === "character" ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                     asynchronous: true
-                                    cache: true
+                                    // Caching every thumbnail keeps a full-size pixmap
+                                    // per library entry alive forever. Scrolling the
+                                    // gallery reloads them cheaply instead.
+                                    cache: false
                                     visible: status !== Image.Error && status !== Image.Null
                                 }
 

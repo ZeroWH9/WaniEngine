@@ -50,7 +50,7 @@ int run_manager(rust::Str arguments,rust::Str runtime_root) {
     QLockFile lock(runtime+u"/waniengine.lock"_s);lock.setStaleLockTime(0);
     if(!options.contains(u"--diagnostics"_s)&&!options.contains(u"--capture"_s)&&!lock.tryLock(100)){
         QLocalSocket socket;socket.connectToServer(socketPath);if(!socket.waitForConnected(1500)){QTextStream(stderr)<<"The running Rust manager is not responding.\n";return 1;}
-        socket.write(options.contains(u"--quit"_s)?"{\"action\":\"exit\"}\n":"{\"action\":\"open\"}\n");socket.waitForBytesWritten(1000);return 0;
+        socket.write(options.contains(u"--quit"_s)?"{\"action\":\"exit\"}\n":options.contains(u"--close"_s)?"{\"action\":\"close\"}\n":"{\"action\":\"open\"}\n");socket.waitForBytesWritten(1000);return 0;
     }
     if(options.contains(u"--quit"_s))return 0;
     QString stateHome=qEnvironmentVariable("XDG_STATE_HOME");if(stateHome.isEmpty())stateHome=QDir::homePath()+u"/.local/state"_s;
@@ -73,7 +73,11 @@ int run_manager(rust::Str arguments,rust::Str runtime_root) {
     QQmlApplicationEngine engine;engine.addImportPath(QString::fromUtf8(runtime_root.data(),static_cast<qsizetype>(runtime_root.size())));
     auto *context=engine.rootContext();context->setContextProperty(u"sceneStore"_s,&scene);context->setContextProperty(u"playlistStore"_s,&playlists);context->setContextProperty(u"mediaOptimizer"_s,&media);context->setContextProperty(u"plasmaIntegration"_s,&desktop);context->setContextProperty(u"overlayController"_s,&overlays);context->setContextProperty(u"applicationController"_s,&application);context->setContextProperty(u"actorAudioController"_s,&audio);context->setContextProperty(u"nativeFilePicker"_s,&picker);context->setContextProperty(u"startHidden"_s,options.contains(u"--background"_s));context->setContextProperty(u"resumeWallpaper"_s,options.contains(u"--resume-wallpaper"_s));
     engine.load(QUrl(u"qrc:/qt/qml/WaniEngine/qml/generated/Main_redesign.qml"_s));if(engine.rootObjects().isEmpty())return 1;
-    auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects().first());controller.setWindow(window);picker.setWindow(window);window->setPersistentGraphics(true);window->setPersistentSceneGraph(true);
+    auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects().first());controller.setWindow(window);picker.setWindow(window);
+    // Do not keep the scene graph and its graphics resources alive after the
+    // window is hidden: this window sits in the tray most of the time, so the
+    // retained GPU memory and pixmaps are pure waste while minimized there.
+    window->setPersistentGraphics(false);window->setPersistentSceneGraph(false);
     QObject::connect(&app,&QCoreApplication::aboutToQuit,&app,[&]{window->setProperty("shuttingDown",true);overlays.clear();audio.clear();desktop.restore();});
     const int verification=options.indexOf(u"--verify-backend"_s);
     if(verification>=0)QTimer::singleShot(0,&app,[&]{
