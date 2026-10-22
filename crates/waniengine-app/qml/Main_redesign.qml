@@ -576,11 +576,15 @@ ApplicationWindow {
         try {
             const state = JSON.parse(sceneStore.loadScene())
             assets = (state.assets || []).map((item) => {
-                const extension = fileExtension(item.url || "")
+                // Resolved assets carry `url`; entries straight from scene.json
+                // only carry `configUrl`. Derive the extension from whichever
+                // media path is available so the card never shows "JSON".
+                const mediaPath = item.url || ""
+                const extension = fileExtension(mediaPath)
                 return Object.assign({
                     extension: extension.toUpperCase(),
                     kind: item.kind || (item.video ? "wallpaper" : "character"),
-                    video: item.video === undefined ? isVideoFile(item.url || "") : item.video,
+                    video: item.video === undefined ? isVideoFile(mediaPath) : item.video,
                     favorite: false,
                     addedAt: 0,
                     fps: 15,
@@ -588,7 +592,7 @@ ApplicationWindow {
                     volume: 50,
                     muted: true,
                     fit: "cover"
-                }, item, !item.width && !item.missing && typeof sceneStore.describeMedia === "function" ? JSON.parse(sceneStore.describeMedia(item.url)) : {})
+                }, item, !item.width && !item.missing && typeof sceneStore.describeMedia === "function" && mediaPath ? JSON.parse(sceneStore.describeMedia(mediaPath)) : {})
             })
             libraryExtras = (state.discovered || []).map((item) => Object.assign({extension: fileExtension(item.url || "").toUpperCase()}, item))
             playlist = (state.playlist || []).filter(url => assets.some(item => item.url===url && item.kind==="wallpaper"))

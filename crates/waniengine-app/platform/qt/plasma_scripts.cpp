@@ -86,6 +86,7 @@ QString PlasmaScripts::restore(int screen, int containmentId, const QString &app
             print('WANIENGINE_JSON:'+JSON.stringify({ok:true,skipped:true,plugin:String(d.wallpaperPlugin)}));
             return;
         }
+        if (!p.original) throw new Error('The original wallpaper for this screen was not recorded.');
         d.currentConfigGroup = ['Wallpaper', p.applied, 'General'];
         if (p.token && String(d.readConfig('SessionToken','inactive')) !== p.token) {
             print('WANIENGINE_JSON:'+JSON.stringify({ok:true,skipped:true,plugin:String(d.wallpaperPlugin)}));

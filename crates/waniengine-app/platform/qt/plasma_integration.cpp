@@ -315,9 +315,30 @@ bool PlasmaIntegration::restore()
 {
     QList<WallpaperSnapshot> remaining;
     for (const WallpaperSnapshot &snapshot : std::as_const(m_snapshots)) {
+        // Without a recorded original there is nothing proven to return to.
+        // Dropping such a snapshot silently leaves the animated wallpaper
+        // running inside plasmashell with no way to recover it later.
+        if (snapshot.originalPlugin.isEmpty()) {
+            setError(u"The original wallpaper for this screen was not recorded, so it cannot be restored automatically."_s);
+            remaining.push_back(snapshot);
+            continue;
+        }
         const QJsonObject result = evaluate(PlasmaScripts::restore(snapshot.screen,snapshot.containmentId,
             snapshot.appliedPlugin,snapshot.sessionToken,snapshot.originalPlugin));
-        if (!result.value(u"ok"_s).toBool()) remaining.push_back(snapshot);
+        const bool restored = result.value(u"ok"_s).toBool() && result.value(u"restored"_s).toBool();
+        if (!restored) {
+            // "skipped" means Plasma is no longer running our plugin: either
+            // the user already changed it, or the session was lost. Keeping the
+            // snapshot only when our plugin is still active avoids a needless
+            // retry loop, while never claiming a restoration that did not happen.
+            const QString current = result.value(u"plugin"_s).toString();
+            const bool stillOurs = current.isEmpty() || current == snapshot.appliedPlugin;
+            if (stillOurs) {
+                if (!result.contains(u"error"_s))
+                    setError(u"Plasma did not confirm the wallpaper restoration yet."_s);
+                remaining.push_back(snapshot);
+            }
+        }
     }
     m_snapshots = remaining;
     const bool active = !m_snapshots.isEmpty();
