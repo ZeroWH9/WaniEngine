@@ -1,6 +1,7 @@
 #include "runtime.h"
 #include <QSGSimpleTextureNode>
 #include <QMouseEvent>
+#include <QImage>
 #include <QImageReader>
 #include <QTimer>
 #include <QDBusMessage>
@@ -20,8 +21,33 @@ VideoFrameLimiter::VideoFrameLimiter(QObject *parent):QObject(parent){
     });
     connect(&m_clock,&FrameClock::tick,this,[this]{
         if(m_target&&m_input.rhi()!=m_target->rhi())m_input.setRhi(m_target->rhi());
-        if(m_pending&&m_target){m_target->setVideoFrame(m_latest);m_pending=false;emit framePresented();}
+        if(m_pending&&m_target){m_target->setVideoFrame(fit(m_latest));m_pending=false;emit framePresented();}
     });
+}
+void VideoFrameLimiter::setMaximumFrameSize(const QSize &size){
+    if(size==m_maximumSize)return;
+    m_maximumSize=size;
+    // Re-fit the retained frame immediately instead of dropping it, which
+    // would leave a blank frame until the decoder delivers the next one.
+    if(m_latest.isValid())m_latest=fit(m_latest);
+    emit maximumFrameSizeChanged();
+}
+QVideoFrame VideoFrameLimiter::fit(QVideoFrame frame){
+    if(!m_maximumSize.isValid()||!frame.isValid())return frame;
+    const QSize source=frame.size();
+    if(source.isEmpty())return frame;
+    // Only oversized frames are converted. Frames that already fit are passed
+    // through untouched, because converting them to QImage costs a CPU copy.
+    // The 5% tolerance avoids converting near-equal sizes caused by rounding.
+    const QSize limit(m_maximumSize.width()+m_maximumSize.width()/20,
+                      m_maximumSize.height()+m_maximumSize.height()/20);
+    if(source.width()<=limit.width()&&source.height()<=limit.height())return frame;
+    const QSize scaled=source.scaled(limit,Qt::KeepAspectRatio);
+    if(scaled.isEmpty()||scaled==source)return frame;
+    QImage image=frame.toImage();
+    if(image.isNull())return frame;
+    image=image.scaled(scaled,Qt::KeepAspectRatio,Qt::SmoothTransformation);
+    return QVideoFrame(image);
 }
 void VideoFrameLimiter::releaseFrame(){
     m_clock.setRunning(false);m_latest={};m_pending=false;

@@ -110,7 +110,16 @@ Item {
                     else { player.stop(); frameLimiter.releaseFrame() }
                 }
             }
-            Engine.VideoFrameLimiter { id: frameLimiter; objectName: "wallpaperFrameLimiter"; fps: root.fpsLimit; target: videoOutput.videoSink }
+            Engine.VideoFrameLimiter {
+                id: frameLimiter
+                objectName: "wallpaperFrameLimiter"
+                fps: root.fpsLimit
+                target: videoOutput.videoSink
+                // Decode at most what the screen can show, so a 4K video on a
+                // 1080p display does not upload four times the needed pixels.
+                maximumFrameSize: Qt.size(Math.max(1, Math.ceil(root.width * root.Screen.devicePixelRatio)),
+                                          Math.max(1, Math.ceil(root.height * root.Screen.devicePixelRatio)))
+            }
             MediaPlayer {
                 id: player
                 objectName: "wallpaperPlayer"
