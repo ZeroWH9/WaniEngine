@@ -71,14 +71,25 @@ fn set_autostart(enabled: bool, executable: &str) -> library::Result<()> {
         return Err("Invalid autostart executable".into());
     }
     std::fs::create_dir_all(path.parent().unwrap())?;
-    let stable_launcher = std::env::var("WANIENGINE_LAUNCHER").ok().or_else(|| {
-        if !std::path::Path::new(executable).ancestors().any(|path| path.join(".waniengine-installation").is_file()) {
-            return None;
-        }
-        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/bin/waniengine").to_string_lossy().into_owned())
-    }).filter(|path| {
-        std::path::Path::new(path).is_absolute() && std::path::Path::new(path).is_file()
-    });
+    let stable_launcher = std::env::var("WANIENGINE_LAUNCHER")
+        .ok()
+        .or_else(|| {
+            if !std::path::Path::new(executable)
+                .ancestors()
+                .any(|path| path.join(".waniengine-installation").is_file())
+            {
+                return None;
+            }
+            std::env::var_os("HOME").map(|home| {
+                std::path::PathBuf::from(home)
+                    .join(".local/bin/waniengine")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .filter(|path| {
+            std::path::Path::new(path).is_absolute() && std::path::Path::new(path).is_file()
+        });
     let executable = stable_launcher.as_deref().unwrap_or(executable);
     let escaped = executable
         .replace('\\', "\\\\")

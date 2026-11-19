@@ -1,4 +1,3 @@
-use waniengine_core::{ActorInstance, Profile, ProfileStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -9,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use waniengine_core::{ActorInstance, Profile, ProfileStore, StoreError};
 
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const SOCKET_NAME: &str = "waniengine.sock";
@@ -77,9 +77,8 @@ impl Options {
                     ));
                 }
                 Some("--state") => {
-                    result.state = Some(PathBuf::from(
-                        iter.next().ok_or("--state requires a path")?,
-                    ));
+                    result.state =
+                        Some(PathBuf::from(iter.next().ok_or("--state requires a path")?));
                 }
                 Some("--help" | "-h") => result.help = true,
                 Some(other) => return Err(format!("unknown option: {other}").into()),
@@ -91,8 +90,8 @@ impl Options {
 }
 
 fn default_socket_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let runtime = env::var_os("XDG_RUNTIME_DIR")
-        .ok_or("XDG_RUNTIME_DIR is not set; provide --socket")?;
+    let runtime =
+        env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is not set; provide --socket")?;
     Ok(PathBuf::from(runtime).join(SOCKET_NAME))
 }
 
@@ -333,8 +332,8 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waniengine_core::AnimationState;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use waniengine_core::AnimationState;
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
 
@@ -343,10 +342,8 @@ mod tests {
     impl TempProfile {
         fn new() -> Self {
             let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
-            let directory = env::temp_dir().join(format!(
-                "waniengine-daemon-{}-{id}",
-                std::process::id()
-            ));
+            let directory =
+                env::temp_dir().join(format!("waniengine-daemon-{}-{id}", std::process::id()));
             Self(directory.join("profile.json"))
         }
 

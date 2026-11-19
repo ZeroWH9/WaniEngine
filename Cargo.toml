@@ -3,6 +3,16 @@ members = [
     "crates/waniengine-core",
     "crates/waniengine-daemon",
     "crates/waniengine-app",
+    "crates/waniengine-egui",
+    "crates/waniengine-wayland",
+]
+# Keep the regular workspace build on the Rust manager. The Qt host remains an
+# explicit package target only while its features are being migrated.
+default-members = [
+    "crates/waniengine-core",
+    "crates/waniengine-daemon",
+    "crates/waniengine-egui",
+    "crates/waniengine-wayland",
 ]
 resolver = "3"
 

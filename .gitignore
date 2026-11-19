@@ -22,7 +22,12 @@ __pycache__/
 .github/*
 !.github/ISSUE_TEMPLATE/
 !.github/ISSUE_TEMPLATE/**
+!.github/workflows/
+!.github/workflows/**
 
 # Ignore Markdown files except README.md
 *.md
 !README.md
+
+# Internal documentation stays local: nothing under docs/ is sent to the repository.
+/docs/

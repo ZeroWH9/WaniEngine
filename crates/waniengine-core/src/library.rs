@@ -1,6 +1,6 @@
 //! Compatible library storage for the Rust manager. Installed content is read-only;
 //! edits, imports and playlists belong to the manager's separate data directory.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
@@ -301,6 +301,7 @@ pub fn resolve_asset(reference: &Value) -> Result<Value> {
     Ok(Value::Object(asset))
 }
 
+#[derive(Clone, Debug)]
 pub struct LibraryStore {
     pub root: PathBuf,
     pub installed_scene: PathBuf,
@@ -380,13 +381,15 @@ fn content_configuration(asset: &Value, folder: &Path) -> Result<Value> {
     };
     let media_url = asset["url"].as_str().ok_or("Missing media URL")?;
     let media_path = file_path(media_url)?;
-    media.insert(
-        "file".into(),
-        match media_path.strip_prefix(folder) {
-            Ok(inside) => json!(inside.to_string_lossy()),
-            Err(_) => json!(media_path.to_string_lossy()),
-        },
-    );
+    match media_path.strip_prefix(folder) {
+        Ok(inside) => {
+            media.insert("file".into(), json!(inside.to_string_lossy()));
+        }
+        Err(_) => {
+            media.insert("file".into(), json!(media_path.to_string_lossy()));
+            media.insert("referenced".into(), json!(true));
+        }
+    }
     if let Some(url) = asset["thumbnailUrl"].as_str() {
         if let Ok(path) = relative(url) {
             media.insert("thumbnail".into(), json!(path));
@@ -435,7 +438,15 @@ impl LibraryStore {
         }
     }
 
+    pub fn lock(&self) -> Result<crate::lock::FileLock> {
+        Ok(crate::lock::FileLock::acquire(
+            &self.root.join(".library.lock"),
+        )?)
+    }
+
     pub fn load_scene(&self) -> Result<Value> {
+        let _transaction = self.lock()?;
+        self.recover_commit()?;
         let own = self.root.join("scene.json");
         let source = if own.is_file() {
             own
@@ -465,7 +476,7 @@ impl LibraryStore {
                                 .map(|s| s.to_string_lossy().into_owned())
                         })
                         .unwrap_or_else(|| "Unavailable content".into());
-                    assets.push(json!({"name":name,"url":config,"configUrl":config,"kind":"wallpaper","missing":true,"loadError":error.to_string(),"width":0,"height":0}));
+                    assets.push(json!({"name":name,"url":config,"configUrl":config,"kind":"wallpaper","missing":true,"loadError":error.to_string(),"width":0,"height":0,"_unavailableReference":reference}));
                 }
             }
         }
@@ -497,6 +508,9 @@ impl LibraryStore {
     }
 
     pub fn save_scene(&self, mut state: Value) -> Result<()> {
+        let _transaction = self.lock()?;
+        self.recover_commit()?;
+        let mut writes = Vec::new();
         if !state.is_object() || !state["assets"].is_array() {
             return Err("Invalid library state".into());
         }
@@ -504,22 +518,91 @@ impl LibraryStore {
         fs::create_dir_all(&self.root)?;
         let own_root = self.root.canonicalize()?;
         for asset in state["assets"].as_array().unwrap() {
+            // A failed resolution is a transient view, not a content configuration.
+            // Never overwrite the original project while its media is unavailable.
+            if asset["_unavailableReference"].is_object() {
+                continue;
+            }
             if let Some(url) = asset["configUrl"].as_str() {
                 let path = file_path(url)?;
                 if let Ok(path) = path.canonicalize() {
                     if path.starts_with(&own_root) {
-                        write_json(
-                            &path,
-                            &content_configuration(
-                                asset,
-                                path.parent().ok_or("Invalid content folder")?,
-                            )?,
-                        )?;
+                        writes.push(json!({"path": path.strip_prefix(&own_root)?.to_string_lossy(), "value": content_configuration(asset, path.parent().ok_or("Invalid content folder")?)?}));
                     }
                 }
             }
         }
-        write_json(&self.root.join("scene.json"), &state)
+        for asset in state["assets"].as_array_mut().unwrap() {
+            if let Some(reference) = asset
+                .get("_unavailableReference")
+                .filter(|value| value.is_object())
+                .cloned()
+            {
+                *asset = reference;
+            }
+        }
+        // Discovered files are computed on every load, not saved library entries.
+        state.as_object_mut().unwrap().remove("discovered");
+        writes.push(json!({"path":"scene.json","value":state}));
+        let journal = json!({"version":1,"writes":writes});
+        if serde_json::to_vec(&journal)?.len() as u64 > MAX_JSON {
+            return Err("Library transaction exceeds 16 MiB".into());
+        }
+        write_json(&self.root.join(".pending-commit.json"), &journal)?;
+        self.recover_commit()
+    }
+
+    fn recover_commit(&self) -> Result<()> {
+        let pending = self.root.join(".pending-commit.json");
+        if !pending.is_file() {
+            return Ok(());
+        }
+        let journal = read_json(&pending)?;
+        if journal["version"] != 1 {
+            return Err("Unsupported library recovery journal".into());
+        }
+        let root = self.root.canonicalize()?;
+        let writes = journal["writes"]
+            .as_array()
+            .ok_or("Invalid library recovery journal")?;
+        let mut checked = Vec::new();
+        for entry in writes {
+            let relative = entry["path"].as_str().ok_or("Invalid journal path")?;
+            let relative_path = Path::new(relative);
+            if relative.is_empty()
+                || relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return Err("Journal destination escapes library".into());
+            }
+            let path = root.join(relative_path);
+            if relative != "scene.json"
+                && path.file_name().and_then(|n| n.to_str()) != Some("content.json")
+            {
+                return Err("Invalid journal destination".into());
+            }
+            if !path
+                .parent()
+                .ok_or("Invalid journal parent")?
+                .canonicalize()?
+                .starts_with(&root)
+                || path.is_symlink()
+            {
+                return Err("Journal destination escapes library".into());
+            }
+            if !entry["value"].is_object() {
+                return Err("Invalid journal value".into());
+            }
+            checked.push((path, &entry["value"]));
+        }
+        for (path, value) in checked {
+            write_json(&path, value)?;
+        }
+        fs::remove_file(pending)?;
+        fs::File::open(root)?.sync_all()?;
+        Ok(())
     }
 
     /// Absorb projects from a previous library location into this store.
@@ -528,6 +611,7 @@ impl LibraryStore {
     /// partial migration can never lose the user's content. Returns the number
     /// of projects created.
     pub fn migrate_from(&self, legacy: &Path) -> Result<usize> {
+        let _transaction = self.lock()?;
         let contents = legacy.join("contents");
         if !contents.is_dir() {
             return Ok(0);
@@ -557,6 +641,7 @@ impl LibraryStore {
     }
 
     pub fn organize(&self, mut asset: Value) -> Result<Value> {
+        let _transaction = self.lock()?;
         let source = file_path(asset["url"].as_str().ok_or("Missing source URL")?)?;
         if !source.is_file() {
             return Err("The source file is unavailable".into());
@@ -640,6 +725,7 @@ impl LibraryStore {
     }
 
     pub fn add_audio(&self, asset: &Value, sources: &[Value]) -> Result<Value> {
+        let _transaction = self.lock()?;
         let mut tracks = asset["audio"]["files"]
             .as_array()
             .cloned()
@@ -813,7 +899,9 @@ mod tests {
         let store = LibraryStore::new(t.0.join("preview"), t.0.join("none"));
         for name in ["..", ".", "../escape", "a/b\\c:d", "   "] {
             let asset = store
-                .organize(json!({"url":file_url(&t.0.join("a.gif")),"name":name,"kind":"wallpaper"}))
+                .organize(
+                    json!({"url":file_url(&t.0.join("a.gif")),"name":name,"kind":"wallpaper"}),
+                )
                 .unwrap();
             let folder = file_path(asset["folderUrl"].as_str().unwrap()).unwrap();
             assert!(
@@ -854,10 +942,15 @@ mod tests {
         fs::write(t.0.join("aura.png"), b"png").unwrap();
         let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
         let asset = store
-            .organize(json!({"url":file_url(&t.0.join("aura.png")),"name":"Aura","kind":"wallpaper"}))
+            .organize(
+                json!({"url":file_url(&t.0.join("aura.png")),"name":"Aura","kind":"wallpaper"}),
+            )
             .unwrap();
         let media = file_path(asset["url"].as_str().unwrap()).unwrap();
-        assert!(media.starts_with(store.root.join("contents/Aura/source")), "{media:?}");
+        assert!(
+            media.starts_with(store.root.join("contents/Aura/source")),
+            "{media:?}"
+        );
         assert!(media.is_file());
         assert_eq!(asset["referenced"], false);
     }
@@ -868,13 +961,18 @@ mod tests {
         fs::write(t.0.join("rain.mp4"), b"mp4").unwrap();
         let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
         let asset = store
-            .organize(json!({"url":file_url(&t.0.join("rain.mp4")),"name":"Rain","kind":"wallpaper"}))
+            .organize(
+                json!({"url":file_url(&t.0.join("rain.mp4")),"name":"Rain","kind":"wallpaper"}),
+            )
             .unwrap();
         let media = file_path(asset["url"].as_str().unwrap()).unwrap();
         assert_eq!(media, t.0.join("rain.mp4"), "video must not be copied");
         assert_eq!(asset["referenced"], true);
         let project = store.root.join("contents/Rain");
-        assert!(!project.join("source/rain.mp4").exists(), "no duplicated video");
+        assert!(
+            !project.join("source/rain.mp4").exists(),
+            "no duplicated video"
+        );
         let metadata = read_json(&project.join("wallpaper.json")).unwrap();
         assert_eq!(metadata["format"], "waniengine-wallpaper");
         assert_eq!(metadata["media"]["referenced"], true);
@@ -887,11 +985,63 @@ mod tests {
         fs::write(t.0.join("rain.webm"), b"webm").unwrap();
         let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
         let asset = store
-            .organize(json!({"url":file_url(&t.0.join("rain.webm")),"name":"Rain","kind":"wallpaper"}))
+            .organize(
+                json!({"url":file_url(&t.0.join("rain.webm")),"name":"Rain","kind":"wallpaper"}),
+            )
             .unwrap();
         let resolved = resolve_asset(&json!({"configUrl":asset["configUrl"]})).unwrap();
         assert_eq!(resolved["url"], file_url(&t.0.join("rain.webm")));
-        assert!(file_path(resolved["url"].as_str().unwrap()).unwrap().is_file());
+        assert!(
+            file_path(resolved["url"].as_str().unwrap())
+                .unwrap()
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn saved_referenced_video_remains_resolvable_from_its_project() {
+        let t = Temp::new();
+        let source = t.0.join("rain.webm");
+        fs::write(&source, b"webm").unwrap();
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        let asset = store
+            .organize(json!({"url":file_url(&source),"name":"Rain","kind":"wallpaper"}))
+            .unwrap();
+        let reference = json!({"configUrl": asset["configUrl"]});
+        store.save_scene(json!({"assets":[asset]})).unwrap();
+        let resolved = resolve_asset(&reference).unwrap();
+        assert_eq!(resolved["url"], file_url(&source));
+        assert_eq!(resolved["referenced"], true);
+    }
+
+    #[test]
+    fn saving_while_media_is_missing_preserves_configuration_and_allows_recovery() {
+        let t = Temp::new();
+        let source = t.0.join("rain.webm");
+        fs::write(&source, b"webm").unwrap();
+        let store = LibraryStore::new(t.0.join("library"), t.0.join("none"));
+        let asset = store
+            .organize(json!({"url":file_url(&source),"name":"Rain","kind":"wallpaper"}))
+            .unwrap();
+        let config = file_path(asset["configUrl"].as_str().unwrap()).unwrap();
+        let original_config = fs::read(&config).unwrap();
+        write_json(
+            &store.root.join("scene.json"),
+            &json!({"assets":[{"configUrl":asset["configUrl"]}],"settings":{"untouched":true}}),
+        )
+        .unwrap();
+        fs::remove_file(&source).unwrap();
+        let state = store.load_scene().unwrap();
+        assert_eq!(state["assets"][0]["missing"], true);
+        store.save_scene(state).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), original_config);
+        let saved = read_json(&store.root.join("scene.json")).unwrap();
+        assert!(saved.get("discovered").is_none());
+        assert!(saved["assets"][0].get("url").is_none());
+        fs::write(&source, b"webm").unwrap();
+        let recovered = store.load_scene().unwrap();
+        assert_eq!(recovered["assets"][0]["url"], file_url(&source));
+        assert_eq!(recovered["settings"]["untouched"], true);
     }
 
     #[test]
@@ -938,7 +1088,8 @@ mod tests {
                         "media":{"file":hostile,"referenced":true}}),
             )
             .unwrap();
-            let resolved = resolve_asset(&json!({"configUrl":file_url(&folder.join("content.json"))}));
+            let resolved =
+                resolve_asset(&json!({"configUrl":file_url(&folder.join("content.json"))}));
             assert!(resolved.is_err(), "{hostile} must be rejected");
         }
     }
@@ -980,7 +1131,10 @@ mod tests {
         store.save_scene(json!({"assets":[saved_asset]})).unwrap();
         let resolved = resolve_asset(&json!({"configUrl":asset["configUrl"]})).unwrap();
         assert_eq!(resolved["scale"], 75);
-        assert_eq!(read_json(&file_path(asset["configUrl"].as_str().unwrap()).unwrap()).unwrap()["format"], "waniengine-content");
+        assert_eq!(
+            read_json(&file_path(asset["configUrl"].as_str().unwrap()).unwrap()).unwrap()["format"],
+            "waniengine-content"
+        );
         assert!(
             file_path(resolved["audio"]["files"][0]["url"].as_str().unwrap())
                 .unwrap()
@@ -1005,5 +1159,109 @@ mod tests {
         store.save_scene(good).unwrap();
         assert!(store.save_scene(json!({})).is_err());
         assert_eq!(store.load_scene().unwrap()["assets"], json!([]));
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    #[test]
+    #[ignore = "subprocess fixture for writers_in_separate_processes_preserve_updates"]
+    fn writer_fixture() {
+        let root = std::env::var_os("WANI_WRITER_FIXTURE").expect("private test root");
+        let store = LibraryStore::new(PathBuf::from(root), "");
+        for _ in 0..10 {
+            let _guard = store.lock().unwrap();
+            let mut scene = store.load_scene().unwrap();
+            scene["count"] = json!(scene["count"].as_u64().unwrap() + 1);
+            store.save_scene(scene).unwrap();
+        }
+    }
+    #[test]
+    fn writers_in_separate_processes_preserve_updates() {
+        let root =
+            std::env::temp_dir().join(format!("wani-process-writers-{}", std::process::id()));
+        let store = LibraryStore::new(&root, "");
+        store.save_scene(json!({"assets":[],"count":0})).unwrap();
+        let mut writers: Vec<_> = (0..4)
+            .map(|_| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "library::transaction_tests::writer_fixture",
+                        "--ignored",
+                    ])
+                    .env("WANI_WRITER_FIXTURE", &root)
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for writer in &mut writers {
+            assert!(writer.wait().unwrap().success());
+        }
+        assert_eq!(store.load_scene().unwrap()["count"], 40);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn write_failure_keeps_commit_recoverable() {
+        let root = std::env::temp_dir().join(format!("wani-failed-commit-{}", std::process::id()));
+        let store = LibraryStore::new(&root, "");
+        store.save_scene(json!({"assets":[],"count":1})).unwrap();
+        std::fs::remove_file(root.join("scene.json")).unwrap();
+        // A non-replaceable destination models a failed rename, without relying
+        // on host filesystem capacity or root's permission bypass.
+        std::fs::create_dir(root.join("scene.json")).unwrap();
+        assert!(store.save_scene(json!({"assets":[],"count":2})).is_err());
+        assert!(root.join(".pending-commit.json").is_file());
+        std::fs::remove_dir(root.join("scene.json")).unwrap();
+        assert_eq!(store.load_scene().unwrap()["count"], 2);
+        assert!(!root.join(".pending-commit.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn concurrent_updates_do_not_lose_previous_changes() {
+        let root = std::env::temp_dir().join(format!("wani-transactions-{}", std::process::id()));
+        let store = LibraryStore::new(&root, "");
+        store.save_scene(json!({"assets":[],"count":0})).unwrap();
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..30 {
+                        let _guard = store.lock().unwrap();
+                        let mut scene = store.load_scene().unwrap();
+                        scene["count"] = json!(scene["count"].as_u64().unwrap() + 1);
+                        store.save_scene(scene).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(store.load_scene().unwrap()["count"], 120);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn interrupted_commit_is_replayed_before_reads_and_cannot_escape_root() {
+        let root = std::env::temp_dir().join(format!("wani-journal-{}", std::process::id()));
+        let store = LibraryStore::new(&root, "");
+        store.save_scene(json!({"assets":[],"count":1})).unwrap();
+        write_json(
+            &root.join(".pending-commit.json"),
+            &json!({"version":1,"writes":[{"path":"scene.json","value":{"assets":[],"count":2}}]}),
+        )
+        .unwrap();
+        assert_eq!(store.load_scene().unwrap()["count"], 2);
+        assert!(!root.join(".pending-commit.json").exists());
+        write_json(
+            &root.join(".pending-commit.json"),
+            &json!({"version":1,"writes":[{"path":"../outside.json","value":{}}]}),
+        )
+        .unwrap();
+        assert!(store.load_scene().is_err());
+        assert_eq!(read_json(&root.join("scene.json")).unwrap()["count"], 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

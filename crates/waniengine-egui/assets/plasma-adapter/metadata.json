@@ -1,0 +1,12 @@
+{
+  "KPackageStructure": "Plasma/Wallpaper",
+  "KPlugin": {
+    "Id": "org.waniengine.rustbridge",
+    "Name": "WaniEngine Rust bridge",
+    "Description": "Desktop composition adapter for the Rust WaniEngine renderer",
+    "Icon": "preferences-desktop-wallpaper",
+    "License": "BSD-3-Clause",
+    "Authors": [{ "Name": "WaniEngine contributors" }]
+  },
+  "X-KDE-ParentApp": "org.kde.plasmashell"
+}

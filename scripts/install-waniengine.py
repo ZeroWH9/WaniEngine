@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Per-user WaniEngine installation. No root privileges or library deletion."""
 import argparse
+import ctypes.util
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import socket
@@ -69,21 +71,45 @@ def verify_bundle(bundle):
     manifest = json.loads((bundle / 'manifest.json').read_text())
     if manifest.get('appId') != APP_ID or manifest.get('architecture') != platform.machine():
         raise RuntimeError('This package does not match WaniEngine or this CPU architecture.')
-    required = {'bin/waniengine', 'lib/qml/WaniEngine/Runtime/qmldir',
-                'lib/qml/WaniEngine/Runtime/libwaniengine_runtime.so',
-                'share/waniengine/wallpaper/metadata.json', 'share/waniengine/waniengine.png'}
-    if not required.issubset(manifest['files']):
+    flavor = manifest.get('runtimeFlavor', 'qt')
+    if flavor not in {'qt', 'egui'}:
+        raise RuntimeError('This package has an unknown runtime flavor.')
+    executable = manifest.get('executable', 'bin/waniengine')
+    if not isinstance(executable, str) or Path(executable).is_absolute() or '..' in Path(executable).parts:
+        raise RuntimeError('The package executable path is invalid.')
+    manifest['runtimeFlavor'] = flavor
+    manifest['executable'] = executable
+    files = manifest.get('files')
+    if not isinstance(files, dict):
+        raise RuntimeError('The package manifest has no file list.')
+    required = {executable, 'share/waniengine/waniengine.png'}
+    if flavor == 'qt':
+        required.update({
+            'lib/qml/WaniEngine/Runtime/qmldir',
+            'lib/qml/WaniEngine/Runtime/libwaniengine_runtime.so',
+            'share/waniengine/wallpaper/metadata.json',
+        })
+    else:
+        # The UI and renderer stay Rust. Only the reviewed Plasma presentation
+        # adapter is allowed to contain QML; no general QML runtime is bundled.
+        allowed_qml = {'share/waniengine/adapters/plasma/contents/ui/main.qml'}
+        for relative in files:
+            if (relative.lower().endswith('.qml') or '/qml/' in ('/' + relative.lower())) and relative not in allowed_qml:
+                raise RuntimeError('Unexpected QML outside the minimal Plasma adapter: ' + relative)
+        adapter = 'share/waniengine/adapters/plasma/'
+        if any(relative.startswith(adapter) for relative in files):
+            required.update(adapter + name for name in ['metadata.json', 'contents/config/main.xml', 'contents/ui/main.qml', 'kwin-ordering.js'])
+    if not required.issubset(files):
         raise RuntimeError('The package is incomplete.')
-    for relative, digest in manifest['files'].items():
+    for relative, digest in files.items():
         path = bundle / relative
         if Path(relative).is_absolute() or '..' in Path(relative).parts or path.is_symlink() or not path.resolve().is_relative_to(bundle.resolve()):
             raise RuntimeError('Invalid package path: ' + relative)
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError('Package checksum mismatch: ' + relative)
-    if not os.access(bundle / 'bin/waniengine', os.X_OK):
+    if not os.access(bundle / executable, os.X_OK):
         raise RuntimeError('The WaniEngine executable is not executable.')
     return manifest
-
 
 def stop_managers():
     runtime = Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/' + str(os.getuid())))
@@ -112,18 +138,20 @@ def stop_managers():
     raise RuntimeError('The running manager did not exit: ' + str(path))
 
 
-def desktop_entry(executable, icon, background=False):
+def desktop_entry(executable, icon, background=False, runtime_flavor='qt'):
     # Desktop Entry Exec has its own escaping rules, distinct from shell quoting.
     quoted = '"' + str(executable).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
-    args = ' --background --resume-wallpaper' if background else ' --resume-wallpaper'
+    if runtime_flavor == 'egui':
+        args = ' --resume-session --background' if background else ''
+    else:
+        args = ' --background --resume-wallpaper' if background else ' --resume-wallpaper'
     return ('[Desktop Entry]\nType=Application\nName=WaniEngine\n'
             'Comment=Animated wallpapers and desktop characters\n'
             f'Exec={quoted}{args}\nIcon={icon}\nTerminal=false\nCategories=Graphics;\n'
             f'StartupWMClass={APP_ID}\nX-KDE-Wayland-Interfaces=org_kde_plasma_window_management\n'
             'X-KDE-autostart-phase=2\n' + MARKER + '\n')
 
-
-def prepare_scene(paths):
+def prepare_scene(paths, runtime_flavor='qt'):
     library = paths['library']
     legacy = paths['state'] / 'WaniEngine/waniengine/library'
     scene_path = library / 'scene.json'
@@ -143,7 +171,14 @@ def prepare_scene(paths):
     }
     if not isinstance(scene, dict) or not isinstance(scene.get('assets'), list):
         raise RuntimeError('The existing library scene is invalid; it has been left unchanged.')
-    scene.setdefault('settings', {}).update(startWithSession=True, restoreOnLaunch=True)
+    settings = scene.setdefault('settings', {})
+    if not isinstance(settings, dict):
+        raise RuntimeError('The existing library settings are invalid; they have been left unchanged.')
+    if runtime_flavor == 'egui':
+        settings.setdefault('startWithSession', False)
+        settings.setdefault('restoreOnLaunch', True)
+    else:
+        settings.update(startWithSession=True, restoreOnLaunch=True)
     return json.dumps(scene, ensure_ascii=False, indent=2) + '\n'
 
 
@@ -157,19 +192,40 @@ def refresh_cache():
 def install(bundle, paths=None, integration=True):
     paths = paths or locations()
     manifest = verify_bundle(bundle)
+    flavor = manifest['runtimeFlavor']
+    executable = bundle / manifest['executable']
     # Validate the current library before modifying any installed files.
-    scene = prepare_scene(paths)
+    scene_text = prepare_scene(paths, flavor)
+    scene = json.loads(scene_text)
     if integration:
-        is_kde = 'kde' in os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        desktop = next((os.environ.get(name, '').strip().lower()
+                        for name in ('XDG_CURRENT_DESKTOP', 'XDG_SESSION_DESKTOP', 'DESKTOP_SESSION')
+                        if os.environ.get(name, '').strip()), '')
+        desktops = {item.strip() for item in re.split(r'[:;,]', desktop) if item.strip()}
+        is_kde = bool(desktops & {'kde', 'plasma', 'plasmawayland', 'plasmax11'})
+        is_gnome = any(item == 'gnome' or item.startswith('gnome-') or item == 'ubuntu'
+                       for item in desktops)
+        if flavor == 'egui' and not (is_kde or is_gnome):
+            raise RuntimeError('The egui package requires a KDE Plasma or GNOME session.')
         required = ['ffmpeg', 'ffprobe']
         if is_kde:
             required.append('plasmashell')
+        if flavor == 'egui' and is_gnome:
+            required.append('gsettings')
         for tool in required:
             if not shutil.which(tool):
                 raise RuntimeError('Missing runtime dependency: ' + tool)
-        checked = subprocess.run(['ldd', str(bundle / 'bin/waniengine')], capture_output=True, text=True)
+        if flavor == 'egui' and ctypes.util.find_library('SDL2-2.0') is None:
+            raise RuntimeError('Missing runtime dependency: SDL2 audio library (libSDL2-2.0.so.0)')
+        if not shutil.which('ffplay'):
+            print('Character audio is unavailable until FFplay is installed. Wallpaper audio uses SDL2.')
+        if is_kde and flavor == 'egui':
+            print('Video wallpaper requires Plasma Wayland, layer-shell and KWin 6.5+. The app probes these capabilities before Apply.')
+        checked = subprocess.run(['ldd', str(executable)], capture_output=True, text=True, timeout=10)
         if checked.returncode or 'not found' in checked.stdout:
-            raise RuntimeError('Missing native Qt runtime library:\n' + checked.stdout)
+            raise RuntimeError('Missing native runtime library:\n' + checked.stdout)
+        if flavor == 'egui' and re.search(r'lib(?:Qt|qml)', checked.stdout, re.IGNORECASE):
+            raise RuntimeError('The egui executable links Qt/QML libraries.')
         stop_managers()
     prefix = paths['prefix']
     prefix.mkdir(parents=True, exist_ok=True)
@@ -220,14 +276,21 @@ def install(bundle, paths=None, integration=True):
         os.replace(temporary, current)
         launcher = ('#!/bin/sh\n# WaniEngine managed launcher\n'
                     'export WANIENGINE_LAUNCHER=' + shlex.quote(str(paths['launcher'])) + '\n'
-                    'exec ' + shlex.quote(str(current / 'bin/waniengine')) + ' "$@"\n')
+                    'export WANIENGINE_DATA_ROOT=' + shlex.quote(str(paths['library'])) + '\n'
+                    'export WANIENGINE_INSTALLED_SCENE=' + shlex.quote(str(state_file)) + '\n'
+                    'exec ' + shlex.quote(str(current / manifest['executable'])) + ' "$@"\n')
         write_atomic(paths['launcher'], launcher, 0o755)
         icon = current / 'share/waniengine/waniengine.png'
-        write_atomic(app, desktop_entry(paths['launcher'], icon))
-        write_atomic(startup, desktop_entry(paths['launcher'], icon, True))
-        write_atomic(shortcut, desktop_entry(paths['launcher'], icon), 0o755)
-        write_atomic(state_file, scene)
-        record = {'version': manifest['version'], 'current': str(version), 'backup': str(backup),
+        write_atomic(app, desktop_entry(paths['launcher'], icon, runtime_flavor=flavor))
+        wants_autostart = flavor == 'qt' or scene.get('settings', {}).get('startWithSession') is True
+        if wants_autostart:
+            write_atomic(startup, desktop_entry(paths['launcher'], icon, True, flavor))
+        elif startup.is_file() and MARKER in startup.read_text(errors='replace'):
+            startup.unlink()
+        write_atomic(shortcut, desktop_entry(paths['launcher'], icon, runtime_flavor=flavor), 0o755)
+        write_atomic(state_file, scene_text)
+        record = {'version': manifest['version'], 'runtimeFlavor': flavor,
+                  'current': str(version), 'backup': str(backup),
                   'library': str(paths['library'])}
         write_atomic(prefix / 'installation.json', json.dumps(record, indent=2) + '\n')
     except Exception:
@@ -268,6 +331,13 @@ def uninstall(paths=None, integration=True):
     launcher = paths['launcher']
     if launcher.is_file() and '# WaniEngine managed launcher' in launcher.read_text():
         launcher.unlink()
+    # Keep the tiny adapter when a crash recovery is pending; removing its
+    # files then would remove the fallback before the desktop is restored.
+    adapter = paths['data'] / 'plasma/wallpapers/org.waniengine.rustbridge'
+    recovery = paths['state'] / 'WaniEngine/plasma-rust-bridge'
+    adapter_marker = adapter / '.waniengine-managed'
+    if adapter_marker.is_file() and adapter_marker.read_text().strip() == APP_ID and not list(recovery.glob('session-*.json')):
+        shutil.rmtree(adapter)
     shutil.rmtree(prefix)
     if integration:
         refresh_cache()

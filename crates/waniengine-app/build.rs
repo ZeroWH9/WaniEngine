@@ -100,8 +100,7 @@ fn main() {
     unsafe {
         builder
             .cc_builder(|cc| {
-                cc.include(&manifest)
-                    .include(manifest.join("platform/qt"));
+                cc.include(&manifest).include(manifest.join("platform/qt"));
                 if let Some(flags) = &layer_shell {
                     for path in &flags.includes {
                         cc.include(path);
@@ -154,9 +153,13 @@ struct PkgConfigFlags {
 /// pkg-config is unavailable or the module is not installed, so optional
 /// dependencies degrade instead of breaking the build.
 fn pkg_config(candidates: &[&str]) -> Option<PkgConfigFlags> {
-    let name = candidates
-        .iter()
-        .find(|name| Command::new("pkg-config").args(["--exists", name]).status().map(|s| s.success()).unwrap_or(false))?;
+    let name = candidates.iter().find(|name| {
+        Command::new("pkg-config")
+            .args(["--exists", name])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })?;
     let output = Command::new("pkg-config")
         .args(["--cflags", "--libs", "--libs-only-l", "--libs-only-L", name])
         .output()

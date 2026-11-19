@@ -1,0 +1,23 @@
+[package]
+name = "waniengine-egui"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+serde.workspace = true
+serde_json.workspace = true
+waniengine-core = { path = "../waniengine-core" }
+waniengine-wayland = { path = "../waniengine-wayland" }
+wayland-client = "0.31.15"
+wayland-protocols-plasma = { version = "0.3.12", features = ["client"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+libc = "0.2.190"
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+rfd = "0.17.2"
+x11rb = { version = "0.13.2", default-features = false, features = ["record"] }
+
+libloading = "0.8.9"

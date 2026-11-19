@@ -1,0 +1,1 @@
+{"uuid":"wani-private-capture@test.invalid","name":"WaniEngine isolated test capture","description":"Only loaded in disposable desktop tests; never packaged or installed on the host.","shell-version":["50","51"]}
