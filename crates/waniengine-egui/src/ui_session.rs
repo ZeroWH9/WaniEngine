@@ -83,6 +83,13 @@ impl WallpaperUi {
     pub fn take_video_error(&self) -> Option<(String, String)> {
         self.live.as_ref()?.take_video_error()
     }
+    pub fn set_video_playing(&self, output: &str, playing: bool) -> Result<(), String> {
+        self.live
+            .as_ref()
+            .ok_or("UI preview does not invoke desktop services")?
+            .set_video_playing(output, playing)
+    }
+
     pub fn set_animation_enabled(
         &self,
         output: &str,

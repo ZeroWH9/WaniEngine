@@ -222,6 +222,15 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.startup.read_text(), '[Desktop Entry]\nName=WaniEngine\n')
         self.assertFalse(self.paths['prefix'].exists())
 
+    def test_stale_control_socket_from_a_dead_manager_is_ignored(self):
+        runtime = self.root / 'runtime'
+        runtime.mkdir()
+        stale = installer.socket.socket(installer.socket.AF_UNIX)
+        stale.bind(str(runtime / 'waniengine-control.sock'))
+        stale.close()
+        with patch.dict(os.environ, {'XDG_RUNTIME_DIR': str(runtime)}):
+            installer.stop_managers()
+
 
 if __name__ == '__main__':
     unittest.main()

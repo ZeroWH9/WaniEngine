@@ -1,4 +1,5 @@
-//! Per-user shutdown socket used by the installer before replacing a running app.
+//! Per-user control socket: the installer stops a running app before replacing
+//! it, and a second launch asks the running app to open its window.
 use std::{
     fs,
     io::{self, BufRead, BufReader, Read, Write},
@@ -26,13 +27,15 @@ pub struct ManagerControl {
 }
 
 impl ManagerControl {
-    pub fn take_exit(&self) -> bool {
-        matches!(self.receiver.try_recv(), Ok(ControlRequest::Exit))
+    pub fn take_requests(&self) -> impl Iterator<Item = ControlRequest> + '_ {
+        self.receiver.try_iter()
     }
 }
 
-enum ControlRequest {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlRequest {
     Exit,
+    Show,
 }
 
 struct ControlServer {
@@ -53,11 +56,31 @@ impl Drop for ControlServer {
     }
 }
 
+fn socket_path() -> io::Result<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|runtime| PathBuf::from(runtime).join(SOCKET_NAME))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))
+}
+
+/// Asks the WaniEngine that already owns the socket to open its window.
+pub fn request_show() -> io::Result<()> {
+    let mut stream = UnixStream::connect(socket_path()?)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(b"{\"action\":\"show\"}\n")?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    if reply.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "the running WaniEngine refused to open its window: {}",
+            reply.trim()
+        )))
+    }
+}
+
 pub fn start() -> io::Result<ManagerControl> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
-    let path = runtime.join(SOCKET_NAME);
+    let path = socket_path()?;
     let listener = bind_socket(&path)?;
     let (sender, receiver) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -131,19 +154,23 @@ fn handle_request(mut stream: UnixStream, sender: &Sender<ControlRequest>) {
         let _ = stream.write_all(b"{\"error\":\"invalid request\"}\n");
         return;
     }
-    if is_exit_request(&request) && sender.send(ControlRequest::Exit).is_ok() {
-        let _ = stream.write_all(b"{\"ok\":true}\n");
-    } else {
-        let _ = stream.write_all(b"{\"error\":\"unknown action\"}\n");
+    match parse_request(&request) {
+        Some(action) if sender.send(action).is_ok() => {
+            let _ = stream.write_all(b"{\"ok\":true}\n");
+        }
+        _ => {
+            let _ = stream.write_all(b"{\"error\":\"unknown action\"}\n");
+        }
     }
 }
 
-fn is_exit_request(request: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(request)
-        .ok()
-        .and_then(|value| value["action"].as_str().map(str::to_owned))
-        .as_deref()
-        == Some("exit")
+fn parse_request(request: &[u8]) -> Option<ControlRequest> {
+    let value = serde_json::from_slice::<serde_json::Value>(request).ok()?;
+    match value["action"].as_str()? {
+        "exit" => Some(ControlRequest::Exit),
+        "show" => Some(ControlRequest::Show),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -199,10 +226,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_exit_action_is_accepted() {
-        assert!(is_exit_request(br#"{"action":"exit"}"#));
-        assert!(!is_exit_request(br#"{"action":"restart"}"#));
-        assert!(!is_exit_request(b"not json"));
+    fn only_the_exit_and_show_actions_are_accepted() {
+        assert_eq!(
+            parse_request(br#"{"action":"exit"}"#),
+            Some(ControlRequest::Exit)
+        );
+        assert_eq!(
+            parse_request(br#"{"action":"show"}"#),
+            Some(ControlRequest::Show)
+        );
+        assert_eq!(parse_request(br#"{"action":"restart"}"#), None);
+        assert_eq!(parse_request(b"not json"), None);
     }
 
     #[test]

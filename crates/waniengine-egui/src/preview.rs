@@ -349,7 +349,8 @@ pub fn run(config: PreviewConfig) -> eframe::Result {
         options,
         Box::new(move |cc| {
             Ok(Box::new(App::new(
-                cc,
+                &cc.egui_ctx,
+                cc.egui_ctx.clone(),
                 location,
                 None,
                 None,

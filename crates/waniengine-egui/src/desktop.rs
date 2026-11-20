@@ -195,6 +195,19 @@ impl WallpaperController {
         }
     }
 
+    /// Pauses or resumes a direct video wallpaper. An output whose renderer is
+    /// not running has nothing to pause: its next start already follows the
+    /// automatic pause state, so it must not fall back to the image adapter.
+    pub fn set_video_playing(&self, output_name: &str, playing: bool) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let result = if self.is_gnome() {
+            sessions.set_all_playing(playing)
+        } else {
+            sessions.set_playing(output_name, playing)
+        };
+        result.unwrap_or(Ok(()))
+    }
+
     pub fn set_animation_enabled(
         &self,
         output_name: &str,

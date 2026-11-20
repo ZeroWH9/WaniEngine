@@ -33,10 +33,12 @@ use library_actions::{ImportKind, ImportResult};
 use location::LibraryLocation;
 use serde_json::Value;
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::PathBuf,
     process::Command,
-    sync::mpsc,
+    rc::Rc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -210,6 +212,8 @@ struct App {
     saved_actor_urls: Vec<String>,
     wallpaper_assignments: HashMap<String, String>,
     attempted_wallpaper_restores: HashSet<(String, String)>,
+    /// Video surfaces lost to a monitor powering off: attempts and next try.
+    wallpaper_retries: HashMap<String, (u32, Instant)>,
     pending_video_reapply: std::collections::VecDeque<(String, String)>,
     last_display_refresh: Instant,
     pending_actor_save: Option<Vec<String>>,
@@ -271,8 +275,11 @@ pub(crate) struct AudioDialog {
 }
 
 impl App {
+    /// `ctx` paints the first window (or is `service` when starting in the
+    /// tray). Long-lived workers wake `service`, which outlives every window.
     fn new(
-        cc: &eframe::CreationContext<'_>,
+        ctx: &egui::Context,
+        service: egui::Context,
         location: LibraryLocation,
         control: Option<control::ManagerControl>,
         tray: Option<tray::TrayController>,
@@ -280,107 +287,8 @@ impl App {
         preview_config: Option<preview::PreviewConfig>,
     ) -> Self {
         let previewing = preview_config.is_some();
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "Inter".into(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/Inter-Regular.ttf"
-            ))),
-        );
-        fonts.font_data.insert(
-            "Inter-Medium".into(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/Inter-Medium.ttf"
-            ))),
-        );
-        fonts.font_data.insert(
-            "Inter-SemiBold".into(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/Inter-SemiBold.ttf"
-            ))),
-        );
-        if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            proportional.insert(0, "Inter".into());
-        }
-        fonts
-            .families
-            .insert(egui::FontFamily::Name("Inter".into()), vec!["Inter".into()]);
-        fonts.families.insert(
-            egui::FontFamily::Name("Inter Medium".into()),
-            vec!["Inter-Medium".into(), "Inter".into()],
-        );
-        fonts.families.insert(
-            egui::FontFamily::Name("Inter SemiBold".into()),
-            vec![
-                "Inter-SemiBold".into(),
-                "Inter-Medium".into(),
-                "Inter".into(),
-            ],
-        );
-        icon_set::register_fonts(&mut fonts);
-        cc.egui_ctx.set_fonts(fonts);
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = SURFACE;
-        style.visuals.window_fill = PANEL;
-        style.visuals.override_text_color = Some(TEXT);
-        style.visuals.widgets.noninteractive.bg_fill = PANEL;
-        style.visuals.widgets.inactive.bg_fill = PANEL;
-        style.visuals.widgets.inactive.weak_bg_fill = PANEL;
-        style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(42, 36, 61);
-        style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(42, 36, 61);
-        style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(58, 49, 83);
-        style.visuals.selection.bg_fill = ACCENT;
-        style.spacing.item_spacing = egui::vec2(12.0, 10.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
-        style.spacing.interact_size = egui::vec2(40.0, 38.0);
-        for widget in [
-            &mut style.visuals.widgets.inactive,
-            &mut style.visuals.widgets.hovered,
-            &mut style.visuals.widgets.active,
-        ] {
-            widget.corner_radius = 8.into();
-        }
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-        style.text_styles.insert(
-            egui::TextStyle::Button,
-            egui::FontId::new(14.0, egui::FontFamily::Name("Inter Medium".into())),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Heading,
-            egui::FontId::new(20.0, egui::FontFamily::Name("Inter SemiBold".into())),
-        );
-        cc.egui_ctx.set_style(style);
-        let logo = image::load_from_memory(include_bytes!("../../../assets/waniengine.png"))
-            .ok()
-            .map(|image| image.thumbnail(96, 96).to_rgba8())
-            .map(|image| {
-                cc.egui_ctx.load_texture(
-                    "wani-logo",
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [image.width() as usize, image.height() as usize],
-                        &image,
-                    ),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
-        let discover_background =
-            image::load_from_memory(include_bytes!("../assets/discover-featured-bg.png"))
-                .ok()
-                .map(|image| image.to_rgba8())
-                .map(|image| {
-                    cc.egui_ctx.load_texture(
-                        "discover-featured-background",
-                        egui::ColorImage::from_rgba_unmultiplied(
-                            [image.width() as usize, image.height() as usize],
-                            &image,
-                        ),
-                        egui::TextureOptions::LINEAR,
-                    )
-                });
+        install_theme(ctx);
+        let (logo, discover_background) = window_textures(ctx);
         let (task_tx, task_rx) = mpsc::channel();
         let mut app = Self {
             location,
@@ -421,6 +329,7 @@ impl App {
             saved_actor_urls: Vec::new(),
             wallpaper_assignments: HashMap::new(),
             attempted_wallpaper_restores: HashSet::new(),
+            wallpaper_retries: HashMap::new(),
             pending_video_reapply: std::collections::VecDeque::new(),
             last_display_refresh: Instant::now(),
             pending_actor_save: None,
@@ -446,17 +355,17 @@ impl App {
             video_texture: None,
             overlay: std::env::current_exe()
                 .ok()
-                .map(|path| OverlayManager::new(path, cc.egui_ctx.clone())),
+                .map(|path| OverlayManager::new(path, service.clone())),
             wallpaper: ui_session::WallpaperUi::new(previewing),
             wallpaper_animation_sync_pending: false,
             wallpaper_pause_applied: None,
             wallpaper_pause_retry_at: None,
             reconcile_pending: false,
             pending_import_status: None,
-            window_state: ui_session::WindowMonitorUi::new(cc.egui_ctx.clone(), previewing),
+            window_state: ui_session::WindowMonitorUi::new(service.clone(), previewing),
             automatic_pause: false,
             pause_saved_playing: HashMap::new(),
-            thumbnails: thumbnails::Thumbnails::new(cc.egui_ctx.clone()),
+            thumbnails: thumbnails::Thumbnails::new(service),
             logo,
             discover_background,
             task_tx,
@@ -476,21 +385,21 @@ impl App {
             preview: preview_config.map(preview::PreviewState::new),
         };
         if previewing {
-            app.seed_preview(&cc.egui_ctx);
-            app.audit_preview_actions(&cc.egui_ctx);
-            app.audit_pointer_actions(&cc.egui_ctx);
+            app.seed_preview(ctx);
+            app.audit_preview_actions(ctx);
+            app.audit_pointer_actions(ctx);
             return app;
         }
         app.reload();
         if let Some(overlay) = &mut app.overlay {
             overlay.refresh_monitors();
         }
-        app.refresh_audio_outputs(&cc.egui_ctx, false);
+        app.refresh_audio_outputs(ctx, false);
         if app.location.migrate && app.location.legacy.is_dir() {
             app.busy = true;
             let location = app.location.clone();
             let tx = app.task_tx.clone();
-            let ctx = cc.egui_ctx.clone();
+            let ctx = ctx.clone();
             thread::spawn(move || {
                 let _panic_guard = PanicGuard::new(tx.clone(), ctx.clone());
                 let result = location
@@ -968,10 +877,35 @@ impl App {
 
     fn request_window_close(&mut self, ctx: &egui::Context) {
         if self.tray_close_enabled() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.window_hidden = true;
-        } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Rebinds window-only state to a newly opened window's context.
+    fn attach_window(&mut self, ctx: &egui::Context) {
+        install_theme(ctx);
+        (self.logo, self.discover_background) = window_textures(ctx);
+        self.window_hidden = false;
+    }
+
+    /// Releases what only the closed window could show.
+    fn detach_window(&mut self) {
+        self.logo = None;
+        self.discover_background = None;
+        self.settings_backdrop = None;
+        self.settings_backdrop_requested = None;
+        self.video_preview.stop();
+        self.video_texture = None;
+        self.thumbnails.clear();
+    }
+
+    /// Keeps the desktop services running while the window is closed to the
+    /// tray, until the tray or a second launch asks for the window again.
+    fn run_in_tray(&mut self, service: &egui::Context, wake: &mpsc::Receiver<()>) {
+        while self.window_hidden && !self.force_exit {
+            let _ = service.run(egui::RawInput::default(), |ctx| self.run_frame(ctx, false));
+            let _ = wake.recv_timeout(Duration::from_millis(250));
         }
     }
 
@@ -1057,20 +991,25 @@ impl App {
         let outputs = assignments
             .into_iter()
             .filter_map(|(output, url)| {
-                if !assets.iter().any(|asset| {
-                    asset["url"].as_str() == Some(url.as_str())
-                        && (asset["video"].as_bool() == Some(true)
-                            || asset["animated"].as_bool() == Some(true))
-                }) {
+                let asset = assets
+                    .iter()
+                    .find(|asset| asset["url"].as_str() == Some(url.as_str()))?;
+                let video = asset["video"].as_bool() == Some(true);
+                if !video && asset["animated"].as_bool() != Some(true) {
                     return None;
                 }
                 if output == GNOME_OUTPUT {
-                    return Some((output, (0, 0), (0, 0)));
+                    return Some((output, (0, 0), (0, 0), video));
                 }
                 let monitor = monitors
                     .iter()
                     .find(|monitor| monitor.name.as_deref() == Some(output.as_str()))?;
-                Some((output, monitor.logical_position?, monitor.logical_size?))
+                Some((
+                    output,
+                    monitor.logical_position?,
+                    monitor.logical_size?,
+                    video,
+                ))
             })
             .collect::<Vec<_>>();
         if outputs.is_empty() {
@@ -1084,10 +1023,13 @@ impl App {
         thread::spawn(move || {
             let _panic_guard = PanicGuard::new(tx.clone(), ctx.clone());
             let mut errors = Vec::new();
-            for (output, position, size) in outputs {
-                if let Err(error) =
+            for (output, position, size, video) in outputs {
+                let result = if video {
+                    wallpaper.set_video_playing(&output, enabled)
+                } else {
                     wallpaper.set_animation_enabled(&output, position, size, enabled)
-                {
+                };
+                if let Err(error) = result {
                     errors.push(error);
                 }
             }
@@ -1780,7 +1722,13 @@ impl App {
     }
 
     fn restore_saved_wallpapers(&mut self, ctx: &egui::Context) {
-        if !self.restore_wallpapers_pending || self.busy || !self.wallpaper.capabilities_ready() {
+        // apply_wallpaper_on refuses while an animation sync runs, and every
+        // restore marks its monitor attempted first: wait, or it is lost.
+        if !self.restore_wallpapers_pending
+            || self.busy
+            || self.wallpaper_animation_sync_pending
+            || !self.wallpaper.capabilities_ready()
+        {
             return;
         }
         let is_gnome = self.wallpaper.is_gnome();
@@ -1819,6 +1767,14 @@ impl App {
                 disconnected = true;
                 continue;
             }
+            if let Some((_, at)) = self.wallpaper_retries.get(&monitor_name) {
+                let wait = at.saturating_duration_since(Instant::now());
+                if !wait.is_zero() {
+                    ctx.request_repaint_after(wait);
+                    disconnected = true;
+                    continue;
+                }
+            }
             let Some(asset) = self
                 .assets
                 .iter()
@@ -1849,6 +1805,24 @@ impl App {
             }
         }
         self.restore_wallpapers_pending = disconnected;
+    }
+
+    /// Restores a video wallpaper whose surface the compositor dropped, after
+    /// its monitor has had time to come back. Returns false once retries run out.
+    fn schedule_wallpaper_retry(&mut self, output: &str) -> bool {
+        const DELAYS: [u64; 5] = [3, 5, 10, 30, 60];
+        let attempts = self.wallpaper_retries.get(output).map_or(0, |(n, _)| *n);
+        let Some(delay) = DELAYS.get(attempts as usize) else {
+            return false;
+        };
+        self.wallpaper_retries.insert(
+            output.to_owned(),
+            (attempts + 1, Instant::now() + Duration::from_secs(*delay)),
+        );
+        self.attempted_wallpaper_restores
+            .retain(|(name, _)| name != output);
+        self.restore_wallpapers_pending = true;
+        true
     }
 
     fn stop_rotation(&mut self) {
@@ -2320,6 +2294,7 @@ impl App {
                     if select_monitor {
                         self.selected_output = Some(output_name.clone());
                     }
+                    self.wallpaper_retries.remove(&output_name);
                     self.wallpaper_assignments
                         .insert(output_name.clone(), url.clone());
                     if assignment_saved.is_ok() {
@@ -2416,13 +2391,19 @@ impl App {
                 TaskResult::Wallpaper {
                     result: Err(error),
                     rotation,
-                    restoration: _,
+                    restoration,
+                    output_name,
                     ..
                 } => {
                     if rotation {
                         self.stop_rotation();
                     }
-                    self.status = Some(error);
+                    let recovering =
+                        restoration && self.wallpaper_retries.contains_key(&output_name);
+                    if !(recovering && self.schedule_wallpaper_retry(&output_name)) {
+                        self.wallpaper_retries.remove(&output_name);
+                        self.status = Some(error);
+                    }
                 }
             }
         }
@@ -3682,20 +3663,148 @@ impl App {
     }
 }
 
+fn install_theme(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "Inter".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "Inter-Medium".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-Medium.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "Inter-SemiBold".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/Inter-SemiBold.ttf"
+        ))),
+    );
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        proportional.insert(0, "Inter".into());
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("Inter".into()), vec!["Inter".into()]);
+    fonts.families.insert(
+        egui::FontFamily::Name("Inter Medium".into()),
+        vec!["Inter-Medium".into(), "Inter".into()],
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("Inter SemiBold".into()),
+        vec![
+            "Inter-SemiBold".into(),
+            "Inter-Medium".into(),
+            "Inter".into(),
+        ],
+    );
+    icon_set::register_fonts(&mut fonts);
+    ctx.set_fonts(fonts);
+    let mut style = (*ctx.style()).clone();
+    style.visuals = egui::Visuals::dark();
+    style.visuals.panel_fill = SURFACE;
+    style.visuals.window_fill = PANEL;
+    style.visuals.override_text_color = Some(TEXT);
+    style.visuals.widgets.noninteractive.bg_fill = PANEL;
+    style.visuals.widgets.inactive.bg_fill = PANEL;
+    style.visuals.widgets.inactive.weak_bg_fill = PANEL;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(42, 36, 61);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(42, 36, 61);
+    style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(58, 49, 83);
+    style.visuals.selection.bg_fill = ACCENT;
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.interact_size = egui::vec2(40.0, 38.0);
+    for widget in [
+        &mut style.visuals.widgets.inactive,
+        &mut style.visuals.widgets.hovered,
+        &mut style.visuals.widgets.active,
+    ] {
+        widget.corner_radius = 8.into();
+    }
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+    style.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::new(14.0, egui::FontFamily::Name("Inter Medium".into())),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Heading,
+        egui::FontId::new(20.0, egui::FontFamily::Name("Inter SemiBold".into())),
+    );
+    ctx.set_style(style);
+}
+
+fn window_textures(
+    ctx: &egui::Context,
+) -> (Option<egui::TextureHandle>, Option<egui::TextureHandle>) {
+    let logo = image::load_from_memory(include_bytes!("../../../assets/waniengine.png"))
+        .ok()
+        .map(|image| image.thumbnail(96, 96).to_rgba8())
+        .map(|image| {
+            ctx.load_texture(
+                "wani-logo",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    &image,
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+    let discover_background =
+        image::load_from_memory(include_bytes!("../assets/discover-featured-bg.png"))
+            .ok()
+            .map(|image| image.to_rgba8())
+            .map(|image| {
+                ctx.load_texture(
+                    "discover-featured-background",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [image.width() as usize, image.height() as usize],
+                        &image,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+    (logo, discover_background)
+}
+
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_settings_backdrop(ctx);
-        self.preview_tick(ctx);
-        self.thumbnails.poll(ctx);
+        self.run_frame(ctx, true);
+    }
+}
+
+impl App {
+    /// One pass of the manager. Without a window (`windowed` false) only the
+    /// desktop services run: nothing is drawn and no textures are loaded.
+    fn run_frame(&mut self, ctx: &egui::Context, windowed: bool) {
+        if windowed {
+            self.poll_settings_backdrop(ctx);
+            self.preview_tick(ctx);
+            self.thumbnails.poll(ctx);
+        }
         if self.preview.is_none() {
-            let explicit_exit = self
+            let requests = self
                 .control
                 .as_ref()
-                .is_some_and(control::ManagerControl::take_exit)
-                || ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::Q));
+                .map(|control| control.take_requests().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let mut explicit_exit =
+                ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::Q));
+            for request in requests {
+                match request {
+                    control::ControlRequest::Exit => explicit_exit = true,
+                    control::ControlRequest::Show => self.show_window(ctx),
+                }
+            }
             if explicit_exit {
                 self.force_exit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -3757,21 +3866,23 @@ impl eframe::App for App {
                     );
                 }
             }
-            if ctx.input(|input| input.viewport().close_requested()) {
-                if self.tray_close_enabled() && !self.force_exit {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    self.window_hidden = true;
-                }
+            // Wayland cannot hide a window, so closing to the tray really
+            // closes it; `main` keeps the services running without one.
+            if ctx.input(|input| input.viewport().close_requested())
+                && self.tray_close_enabled()
+                && !self.force_exit
+            {
+                self.window_hidden = true;
             }
-            if self.window_hidden {
-                ctx.request_repaint_after(Duration::from_millis(250));
+            if windowed {
+                handle_borderless_resize(ctx);
+                self.thumbnails.poll(ctx);
             }
-            handle_borderless_resize(ctx);
-            self.thumbnails.poll(ctx);
             self.poll_tasks(ctx);
             self.refresh_automatic_pause(ctx);
-            self.sync_video_preview(ctx);
+            if windowed {
+                self.sync_video_preview(ctx);
+            }
             self.tick_rotation(ctx);
             self.dispatch_video_updates(ctx);
             if self.last_display_refresh.elapsed() > Duration::from_secs(2) {
@@ -3822,15 +3933,15 @@ impl eframe::App for App {
             if self.last_audio_sync.elapsed() >= Duration::from_millis(100) {
                 self.last_audio_sync = Instant::now();
                 if let Some((output, error)) = self.wallpaper.take_video_error() {
-                    if error.contains("disconnected") {
-                        self.attempted_wallpaper_restores
-                            .retain(|(name, _)| name != &output);
-                        self.restore_wallpapers_pending = true;
-                    } else {
+                    // KWin closes layer surfaces when a monitor powers off,
+                    // before or instead of removing its output.
+                    let output_lost = error.contains("disconnected")
+                        || error.contains("closed the wallpaper surface");
+                    if !(output_lost && self.schedule_wallpaper_retry(&output)) {
                         self.wallpaper_assignments.remove(&output);
+                        self.status = Some(error);
                     }
                     self.stop_rotation();
-                    self.status = Some(error);
                 }
                 // Wallpaper volume follows the slider live. Character players take their volume
                 // at spawn, so dragging must not restart them: they use the saved value.
@@ -3865,6 +3976,9 @@ impl eframe::App for App {
                 self.sync_wallpaper_video_audio(global_volume);
             }
             self.restore_saved_wallpapers(ctx);
+        }
+        if !windowed {
+            return;
         }
         self.draw_interface(ctx);
         let frame_rate = self
@@ -4848,6 +4962,23 @@ fn main() -> eframe::Result {
         eprintln!("waniengine-egui: {error}");
         std::process::exit(2);
     });
+    let control = match control::start() {
+        Ok(control) => control,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if location.start_in_tray {
+                return Ok(());
+            }
+            if let Err(error) = control::request_show() {
+                eprintln!("waniengine-egui: {error}");
+                std::process::exit(2);
+            }
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("waniengine-egui: could not start control socket: {error}");
+            std::process::exit(2);
+        }
+    };
     let tray = match tray::TrayController::start() {
         Ok(tray) => Some(tray),
         Err(error) => {
@@ -4867,37 +4998,192 @@ fn main() -> eframe::Result {
         .and_then(|scene| scene["settings"]["msaaSamples"].as_u64())
         .filter(|samples| matches!(samples, 0 | 2 | 4 | 8))
         .unwrap_or(4) as u16;
-    let control = {
-        Some(control::start().unwrap_or_else(|error| {
-            eprintln!("waniengine-egui: could not start control socket: {error}");
-            std::process::exit(2);
-        }))
-    };
-    let options = eframe::NativeOptions {
+    let options = || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("org.waniengine.WaniEngine")
             .with_inner_size([1600.0, 1000.0])
             .with_min_inner_size([960.0, 720.0])
-            .with_visible(!start_in_tray)
             .with_transparent(true)
             .with_decorations(false),
         multisampling: msaa_samples,
         ..Default::default()
     };
-    eframe::run_native(
-        "WaniEngine",
-        options,
-        Box::new(move |cc| {
-            Ok(Box::new(App::new(
-                cc,
-                location,
-                control,
-                tray,
-                start_in_tray,
-                None,
-            )))
-        }),
-    )
+
+    // Workers keep this context for wakeups; it outlives every window and
+    // forwards their repaint requests to whichever window is open.
+    let service = egui::Context::default();
+    let window = Arc::new(Mutex::new(None::<egui::Context>));
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    {
+        let window = Arc::clone(&window);
+        service.set_request_repaint_callback(move |info| {
+            match &*window.lock().unwrap_or_else(|e| e.into_inner()) {
+                Some(ctx) => ctx.request_repaint_after(info.delay),
+                None if info.delay < Duration::from_millis(10) => {
+                    let _ = wake_tx.try_send(());
+                }
+                None => {}
+            }
+        });
+    }
+    let slot = Rc::new(RefCell::new(None::<App>));
+    let mut services = Some((location, Some(control), tray));
+    if start_in_tray {
+        let (location, control, tray) = services.take().expect("services start once");
+        *slot.borrow_mut() = Some(App::new(
+            &service,
+            service.clone(),
+            location,
+            control,
+            tray,
+            true,
+            None,
+        ));
+    }
+    loop {
+        let hidden = slot.borrow_mut().take();
+        if let Some(mut app) = hidden {
+            app.run_in_tray(&service, &wake_rx);
+            let exit = app.force_exit;
+            *slot.borrow_mut() = Some(app);
+            if exit {
+                break;
+            }
+        }
+        let creator_slot = Rc::clone(&slot);
+        let host_slot = Rc::clone(&slot);
+        let surface = Rc::new(std::cell::Cell::new(None));
+        let creator_surface = Rc::clone(&surface);
+        let creator_window = Arc::clone(&window);
+        let creator_service = service.clone();
+        let mut first_services = services.take();
+        eframe::run_native(
+            "WaniEngine",
+            options(),
+            Box::new(move |cc| {
+                *creator_window.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(cc.egui_ctx.clone());
+                creator_surface.set(WaylandSurface::of(cc));
+                let app = match creator_slot.borrow_mut().take() {
+                    Some(mut app) => {
+                        app.attach_window(&cc.egui_ctx);
+                        app
+                    }
+                    None => {
+                        let (location, control, tray) =
+                            first_services.take().expect("services start once");
+                        App::new(
+                            &cc.egui_ctx,
+                            creator_service.clone(),
+                            location,
+                            control,
+                            tray,
+                            false,
+                            None,
+                        )
+                    }
+                };
+                Ok(Box::new(WindowHost {
+                    app: Some(app),
+                    slot: host_slot,
+                    service: creator_service,
+                }))
+            }),
+        )?;
+        *window.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        match slot.borrow_mut().as_mut() {
+            Some(app) if app.window_hidden && !app.force_exit => {
+                if let Some(surface) = surface.get() {
+                    surface.unmap();
+                }
+                app.detach_window();
+            }
+            _ => break,
+        }
+    }
+    // Stopping the services restores the desktop before the process exits.
+    drop(slot.borrow_mut().take());
+    Ok(())
+}
+
+/// winit destroys a closed Wayland window only on its event loop's next
+/// iteration, which never comes while WaniEngine runs in the tray, so the
+/// closed window would stay on screen. Unmapping its surface hides it now.
+#[derive(Clone, Copy)]
+struct WaylandSurface {
+    display: *mut wayland_sys::client::wl_display,
+    surface: *mut wayland_sys::client::wl_proxy,
+}
+
+impl WaylandSurface {
+    fn of(
+        handles: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
+    ) -> Option<Self> {
+        use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+        let RawWindowHandle::Wayland(window) = handles.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        let RawDisplayHandle::Wayland(display) = handles.display_handle().ok()?.as_raw() else {
+            return None;
+        };
+        Some(Self {
+            display: display.display.as_ptr().cast(),
+            surface: window.surface.as_ptr().cast(),
+        })
+    }
+
+    fn unmap(self) {
+        use wayland_sys::{client::wayland_client_option, common::wl_argument};
+        const ATTACH: u32 = 1;
+        const COMMIT: u32 = 6;
+        let Some(client) = wayland_client_option() else {
+            return;
+        };
+        let mut attach = [
+            wl_argument { o: std::ptr::null() },
+            wl_argument { i: 0 },
+            wl_argument { i: 0 },
+        ];
+        let mut commit = [wl_argument { i: 0 }];
+        // SAFETY: winit keeps the surface proxy and its connection alive until
+        // its event loop runs again, and nothing else uses them meanwhile.
+        // A null buffer followed by a commit is how xdg-shell unmaps a toplevel.
+        unsafe {
+            (client.wl_proxy_marshal_array)(self.surface, ATTACH, attach.as_mut_ptr());
+            (client.wl_proxy_marshal_array)(self.surface, COMMIT, commit.as_mut_ptr());
+            (client.wl_display_flush)(self.display);
+        }
+    }
+}
+
+/// The window's view of the manager. Closing the window hands the manager
+/// back to `main` instead of dropping it, so it can keep running in the tray.
+struct WindowHost {
+    app: Option<App>,
+    slot: Rc<RefCell<Option<App>>>,
+    service: egui::Context,
+}
+
+impl eframe::App for WindowHost {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // An empty pass re-arms the service context's repaint callback.
+        let _ = self.service.run(egui::RawInput::default(), |_| {});
+        if let Some(app) = &mut self.app {
+            app.run_frame(ctx, true);
+        }
+    }
+}
+
+impl Drop for WindowHost {
+    fn drop(&mut self) {
+        if let Some(app) = self.app.take() {
+            *self.slot.borrow_mut() = Some(app);
+        }
+    }
 }
 
 #[cfg(test)]

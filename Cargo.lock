@@ -3190,6 +3190,7 @@ dependencies = [
  "image",
  "libc",
  "libloading",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
@@ -3197,6 +3198,7 @@ dependencies = [
  "waniengine-wayland",
  "wayland-client",
  "wayland-protocols-plasma",
+ "wayland-sys",
  "x11rb",
  "zbus",
 ]

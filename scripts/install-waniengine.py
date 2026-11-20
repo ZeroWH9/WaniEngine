@@ -119,7 +119,11 @@ def stop_managers():
     try:
         with socket.socket(socket.AF_UNIX) as channel:
             channel.settimeout(3)
-            channel.connect(str(path))
+            try:
+                channel.connect(str(path))
+            except ConnectionRefusedError:
+                # Left behind by a manager that died; nothing is listening.
+                return
             channel.sendall(b'{"action":"exit"}\n')
         # Exit restores the previous wallpaper and tears down actor workers.
         for _ in range(100):

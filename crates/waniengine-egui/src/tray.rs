@@ -113,12 +113,17 @@ impl StatusNotifierItem {
 
     #[zbus(property)]
     fn icon_name(&self) -> String {
-        "waniengine".into()
+        // The installed icon is not part of the icon theme, so a themed name
+        // resolves to nothing and the host draws an empty slot.
+        String::new()
     }
 
     #[zbus(property)]
     fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
-        Vec::new()
+        // Built on the host's first read, so registration never waits on it.
+        static PIXMAPS: std::sync::OnceLock<Vec<(i32, i32, Vec<u8>)>> =
+            std::sync::OnceLock::new();
+        PIXMAPS.get_or_init(icon_pixmaps).clone()
     }
 
     #[zbus(property)]
@@ -296,6 +301,32 @@ fn string_value(value: &str) -> OwnedValue {
     OwnedValue::try_from(Value::new(value)).expect("string is a supported D-Bus value")
 }
 
+/// StatusNotifierItem pixmaps are ARGB32 in network byte order.
+fn icon_pixmaps() -> Vec<(i32, i32, Vec<u8>)> {
+    let Ok(image) = image::load_from_memory(include_bytes!("../../../assets/waniengine.png"))
+    else {
+        return Vec::new();
+    };
+    // Box-filter downscaling first keeps this fast even from the full-size logo.
+    let image = image.thumbnail(128, 128);
+    [16, 22, 24, 32, 48, 64, 128]
+        .into_iter()
+        .map(|size| {
+            let icon = image
+                .resize(size, size, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+            let argb = icon
+                .pixels()
+                .flat_map(|pixel| {
+                    let [red, green, blue, alpha] = pixel.0;
+                    [alpha, red, green, blue]
+                })
+                .collect();
+            (icon.width() as i32, icon.height() as i32, argb)
+        })
+        .collect()
+}
+
 fn run_status_notifier(
     events: Sender<TrayAction>,
     ready: mpsc::SyncSender<Result<(), String>>,
@@ -392,4 +423,19 @@ fn register_status_notifier(
         "no StatusNotifierWatcher accepted WaniEngine: {}",
         last_error.unwrap_or_else(|| "the watcher is unavailable".into())
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_icon_ships_argb_pixmaps_instead_of_a_theme_name() {
+        let pixmaps = icon_pixmaps();
+        assert!(pixmaps.iter().any(|(width, _, _)| *width == 22));
+        for (width, height, argb) in &pixmaps {
+            assert_eq!(argb.len(), (*width * *height * 4) as usize);
+            assert!(argb.chunks_exact(4).any(|pixel| pixel[0] > 0));
+        }
+    }
 }

@@ -12,6 +12,8 @@ serde_json.workspace = true
 waniengine-core = { path = "../waniengine-core" }
 waniengine-wayland = { path = "../waniengine-wayland" }
 wayland-client = "0.31.15"
+wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
+raw-window-handle = "0.6.2"
 wayland-protocols-plasma = { version = "0.3.12", features = ["client"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 libc = "0.2.190"
